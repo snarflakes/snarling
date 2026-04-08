@@ -1,0 +1,18 @@
+[Unit]
+Description=snarling Display Service
+After=graphical.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+User=openpi
+WorkingDirectory=/home/openpi/.openclaw/workspace/snarling
+ExecStart=/home/openpi/displayhat-env/bin/python /home/openpi/.openclaw/workspace/snarling/snarling.py
+Restart=on-failure
+RestartSec=5
+Environment="OPENCLAW_TOKEN=c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/home/openpi/.openclaw/workspace/snarling"
+
+[Install]
+WantedBy=default.target

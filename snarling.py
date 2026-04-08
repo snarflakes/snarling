@@ -1,0 +1,524 @@
+
+#!/usr/bin/env python3
+"""
+snarling-style Creature for DisplayHAT Mini
+Screen: 320x240, rotated 180 degrees
+"""
+
+from displayhatmini import DisplayHATMini
+from PIL import Image, ImageDraw, ImageFont
+import time
+import math
+import signal
+import sys
+
+# Import OpenClaw integration
+try:
+    from snarling_openclaw import OpenClawIntegration, snarlingState
+    OPENCLAW_AVAILABLE = True
+except ImportError:
+    OPENCLAW_AVAILABLE = False
+    print("Warning: OpenClaw integration not available")
+
+# Screen dimensions
+WIDTH = DisplayHATMini.WIDTH
+HEIGHT = DisplayHATMini.HEIGHT
+
+# States
+STATE_SLEEPING = "sleeping"
+STATE_PROCESSING = "processing"
+STATE_COMMUNICATING = "communicating"
+STATE_ERROR = "error"
+
+# Color constants
+COLOR_BG = (20, 30, 40)
+COLOR_TEXT = (255, 255, 255)
+COLOR_SLEEP = (100, 150, 255)
+COLOR_PROCESS = (0, 200, 255)
+COLOR_COMM = (0, 255, 220)
+COLOR_ERROR = (255, 80, 80)
+
+# Pwnagotchi-style ASCII face expressions with animations
+
+class FaceExpressions:
+    """Pwnagotchi-style Unicode face expressions"""
+
+    # Sleeping faces - calm, resting
+    SLEEP = ['(⇀‿‿↼)', '(≖‿‿≖)']
+
+    # Processing faces - focused, working
+    PROCESSING = ['(◕‿‿◕)', '(•‿‿•)', '(-__-)', '(✜‿‿✜)']
+
+    # Communicating faces - excited, talking
+    COMMUNICATING = ['(ᵔ◡◡ᵔ)', '(°▃▃°)', '(⌐■_■)', '(☼‿‿☼)']
+
+    # Error faces - distressed, broken
+    ERROR = ['(╥☁╥ )', '(-_-\')', '(☓‿‿☓)', '(#__#)']
+
+    @classmethod
+    def get_faces_for_state(cls, state):
+        """Get appropriate faces for a given state"""
+        if state == STATE_SLEEPING:
+            return cls.SLEEP
+        elif state == STATE_PROCESSING:
+            return cls.PROCESSING
+        elif state == STATE_COMMUNICATING:
+            return cls.COMMUNICATING
+        elif state == STATE_ERROR:
+            return cls.ERROR
+        return cls.SLEEP
+
+class snarlingCreature:
+    """Main creature class"""
+
+    def __init__(self):
+        self.state = STATE_SLEEPING
+        self.mute = False
+        self.last_update = time.time()
+        self.breath_phase = 0.0
+        self.think_dots = 0
+        self.talk_frame = 0
+        self.running = True
+        self.status_message = ""
+        self.status_timer = 0
+
+        # Screen sleep mode flag
+        self.screen_asleep = False
+
+        # Face animation attributes
+        self.current_face = "(◕‿‿◕)"
+        self.face_index = 0
+        self.face_timer = 0
+        self.animation_offset_x = 0
+        self.animation_offset_y = 0
+
+        # LED brightness for breathing (0-1)
+        self.led_brightness = 0.5
+
+        # LED timer for state change indication
+        self.led_timer = 0
+
+        # OpenClaw integration
+        self.openclaw = None
+        self.openclaw_connected = False
+        if OPENCLAW_AVAILABLE:
+            try:
+                self.openclaw = OpenClawIntegration()
+                self.openclaw.start()
+                self.openclaw_connected = True
+                print("OpenClaw integration started")
+            except Exception as e:
+                print(f"Failed to start OpenClaw integration: {e}")
+
+        # Initialize display
+        self.img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG)
+        self.draw = ImageDraw.Draw(self.img)
+        self.display = DisplayHATMini(self.img)
+
+        # Set initial LED
+        self.update_led()
+
+        # Button handlers
+        self.button_pressed = {
+            'A': False,
+            'B': False,
+            'X': False,
+            'Y': False
+        }
+
+        # Setup signal handlers for clean exit
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+
+    def signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        self.running = False
+
+    def update_led(self):
+        """Update LED based on state and breathing animation (0-1 float values)"""
+        # Turn off LED when screen is asleep
+        if self.screen_asleep:
+            self.display.set_led(0, 0, 0)
+            return
+        
+        if self.led_timer > 0:
+            if self.state == STATE_SLEEPING:
+                # Blue breathing LED (r, g, b as 0-1 floats)
+                brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
+                brightness *= 0.7  # Reduce by 30%
+                self.display.set_led(0, brightness * 0.25, brightness * 0.5)
+            elif self.state == STATE_PROCESSING:
+                # Bright blue LED
+                self.display.set_led(0, 0.42, 0.7)
+            elif self.state == STATE_COMMUNICATING:
+                # Cyan pulsing
+                pulse = 0.5 + 0.5 * math.sin(self.breath_phase * 2)
+                pulse *= 0.7  # Reduce by 30%
+                self.display.set_led(0, pulse, pulse)
+            elif self.state == STATE_ERROR:
+                # Red alert
+                blink = 1.0 if int(self.breath_phase * 3) % 2 == 0 else 0.4
+                blink *= 0.7  # Reduce by 30%
+                self.display.set_led(blink, 0, 0)
+        else:
+            # LED off
+            self.display.set_led(0, 0, 0)
+
+    def get_color(self):
+        """Get current color based on state"""
+        colors = {
+            STATE_SLEEPING: COLOR_SLEEP,
+            STATE_PROCESSING: COLOR_PROCESS,
+            STATE_COMMUNICATING: COLOR_COMM,
+            STATE_ERROR: COLOR_ERROR
+        }
+        return colors.get(self.state, COLOR_SLEEP)
+
+    def get_current_face(self):
+        """Get current face expression"""
+        return self.current_face
+
+    def update_face(self, dt):
+        """Update face animation and expression"""
+        # Update face timer for expression changes
+        self.face_timer += dt
+        if self.face_timer > 2.0:  # Change face every 2 seconds for more variety
+            faces = FaceExpressions.get_faces_for_state(self.state)
+            if faces:
+                self.face_index = (self.face_index + 1) % len(faces)
+                self.current_face = faces[self.face_index]
+            self.face_timer = 0
+
+        # Update animation offsets based on state
+        if self.state == STATE_SLEEPING:
+            # Slow bobbing up and down
+            self.animation_offset_y = int(8 * math.sin(self.breath_phase * 0.5))
+            self.animation_offset_x = 0
+        elif self.state == STATE_PROCESSING:
+            # Tilting left and right
+            self.animation_offset_x = int(6 * math.sin(self.breath_phase * 1.5))
+            self.animation_offset_y = 0
+        elif self.state == STATE_COMMUNICATING:
+            # Fast up and down
+            self.animation_offset_y = int(4 * math.sin(self.breath_phase * 3))
+            self.animation_offset_x = 0
+        elif self.state == STATE_ERROR:
+            # Side to side movement
+            self.animation_offset_x = int(10 * math.sin(self.breath_phase * 2))
+            self.animation_offset_y = 0
+
+    def draw_face(self):
+        """Draw the face expression in the center of the screen using DejaVuSansMono like pwnagotchi"""
+        face = self.get_current_face()
+        color = self.get_color()
+
+        # Cache font lookup on first call - use DejaVuSansMono like pwnagotchi
+        if not hasattr(self, '_cached_font'):
+            self._cached_font_size = 48
+            
+            try:
+                # Use DejaVuSansMono-Bold like pwnagotchi
+                self._cached_font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 
+                    self._cached_font_size
+                )
+                print("Loaded DejaVuSansMono-Bold font")
+            except Exception as e:
+                # Fallback
+                try:
+                    self._cached_font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 
+                        self._cached_font_size
+                    )
+                    print(f"Loaded DejaVuSansMono font (Bold not available)")
+                except:
+                    self._cached_font = ImageFont.load_default()
+                    print("Warning: Using default font")
+
+        font = self._cached_font
+        
+        # Create a larger canvas for high-quality rendering
+        render_scale = 2
+        render_size = self._cached_font_size * render_scale
+        
+        try:
+            # Reload at larger size
+            large_font = ImageFont.truetype(font.path, render_size)
+        except:
+            large_font = font
+            render_scale = 1
+
+        # Get text bounding box for centering
+        bbox = self.draw.textbbox((0, 0), face, font=large_font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+
+        # Create temporary image for high-quality rendering
+        padding = 20
+        temp_width = text_width + padding * 2
+        temp_height = text_height + padding * 2
+        
+        text_img = Image.new('RGBA', (temp_width, temp_height), (0, 0, 0, 0))
+        text_draw = ImageDraw.Draw(text_img)
+
+        # Draw text with bbox offset to ensure full glyph visibility
+        text_draw.text((padding - bbox[0], padding - bbox[1]), face, fill=color, font=large_font)
+
+        # Scale down if we rendered large
+        if render_scale > 1:
+            final_size = (temp_width // render_scale, temp_height // render_scale)
+            text_img = text_img.resize(final_size, Image.Resampling.LANCZOS)
+
+        # Center position with animation offsets
+        x = (WIDTH - text_img.width) // 2 + self.animation_offset_x
+        y = (HEIGHT - text_img.height) // 2 + self.animation_offset_y - 10
+
+        # Paste with alpha blending
+        if text_img.mode == 'RGBA':
+            mask = text_img.split()[3]  # Alpha channel
+            self.img.paste(text_img, (x, y), mask)
+        else:
+            self.img.paste(text_img, (x, y))
+
+    def draw_status(self):
+        """Draw status bar at bottom"""
+        # Mute indicator
+        if self.mute:
+            self.draw.text((10, HEIGHT - 25), "🔇", fill=(150, 150, 150))
+
+        # State indicator
+        state_text = f"State: {self.state.upper()}"
+        self.draw.text((WIDTH - 120, HEIGHT - 25), state_text, fill=(200, 200, 200))
+
+        # Status message overlay
+        if self.status_timer > 0:
+            # Semi-transparent background
+            overlay_y = HEIGHT - 60
+            self.draw.rectangle((10, overlay_y, WIDTH - 10, overlay_y + 30), fill=(40, 50, 60))
+            self.draw.text((15, overlay_y + 5), self.status_message, fill=(255, 255, 200))
+
+    def show_status_summary(self):
+        """Show detailed status summary"""
+        self.status_message = f"{self.state.upper()} | Mute: {self.mute}"
+        self.status_timer = 90  # 3 seconds at 30fps
+
+    def trigger_heartbeat(self):
+        """Trigger a heartbeat check"""
+        self.status_message = "❤️ Heartbeat OK"
+        self.status_timer = 60
+
+    def toggle_sleep_mode(self):
+        """Toggle sleep mode for screen (replaces cycle_state)"""
+        self.screen_asleep = not self.screen_asleep
+        
+        if self.screen_asleep:
+            # Entering sleep mode
+            self.status_message = "💤 Sleep mode"
+            self.status_timer = 60  # 2 seconds at 30fps
+            self.led_timer = 0  # Turn off LED immediately
+        else:
+            # Waking up
+            self.status_message = "☀️ Wake up"
+            self.status_timer = 45  # 1.5 seconds at 30fps
+            # Restore LED for current state
+            self.led_timer = 10
+
+    def cycle_state(self):
+        """Cycle through states for demo"""
+        states = [STATE_SLEEPING, STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR]
+        current_idx = states.index(self.state)
+        self.state = states[(current_idx + 1) % len(states)]
+        self.status_message = f"State: {self.state.upper()}"
+        self.status_timer = 45
+
+        # Reset face animation when state changes
+
+        # LED on for 10 seconds on state change
+        self.led_timer = 10
+        self.face_index = 0
+        self.face_timer = 0
+        faces = FaceExpressions.get_faces_for_state(self.state)
+        self.current_face = faces[0] if faces else "(◕‿‿◕)"
+
+    def toggle_mute(self):
+        """Toggle mute/quiet mode"""
+        self.mute = not self.mute
+        self.status_message = "Muted" if self.mute else "Unmuted"
+        self.status_timer = 45
+
+    def check_buttons(self):
+        """Check for button presses"""
+        buttons = {
+            'A': self.display.BUTTON_A,
+            'B': self.display.BUTTON_B,
+            'X': self.display.BUTTON_X,
+            'Y': self.display.BUTTON_Y
+        }
+
+        for name, button in buttons.items():
+            pressed = self.display.read_button(button)
+
+            if pressed and not self.button_pressed[name]:
+                # Button just pressed
+                if name == 'A':
+                    self.show_status_summary()
+                elif name == 'B':
+                    self.trigger_heartbeat()
+                elif name == 'X':
+                    self.toggle_sleep_mode()
+                elif name == 'Y':
+                    self.toggle_mute()
+
+            self.button_pressed[name] = pressed
+
+    def update(self, dt):
+        """Update creature state"""
+        # Update breathing phase (2 second cycle)
+        self.breath_phase = (self.breath_phase + dt * 3) % (2 * math.pi)
+
+        # Update LED timer
+        if self.led_timer > 0:
+            self.led_timer -= dt
+
+        # Update face animation
+        self.update_face(dt)
+
+        # Poll OpenClaw state if available
+        if self.openclaw and self.openclaw_connected:
+            try:
+                oc_state = self.openclaw.get_state()
+                # Debug logging
+                print(f"[snarling] OpenClaw state: {oc_state.value}, Current state: {self.state}")
+                
+                # Map OpenClaw states to snarling states
+                state_map = {
+                    snarlingState.SLEEPING: STATE_SLEEPING,
+                    snarlingState.PROCESSING: STATE_PROCESSING,
+                    snarlingState.COMMUNICATING: STATE_COMMUNICATING,
+                    snarlingState.ERROR: STATE_ERROR,
+                }
+                new_state = state_map.get(oc_state, STATE_SLEEPING)
+                if new_state != self.state:
+                    print(f"[snarling] State transition: {self.state} -> {new_state}")
+                    self.state = new_state
+                    # LED on for 10 seconds on state change
+                    # When going to sleeping/idle, turn LED off immediately
+                    if new_state == STATE_SLEEPING:
+                        self.led_timer = 0
+                    else:
+                        self.led_timer = 10
+                    # Update face immediately on state change
+                    faces = FaceExpressions.get_faces_for_state(self.state)
+                    if faces:
+                        self.face_index = 0
+                        self.current_face = faces[0]
+                    self.face_timer = 0
+            except Exception as e:
+                print(f"[snarling] OpenClaw error: {e}")
+                # Degrade gracefully
+                pass
+
+        # Update LED
+        self.update_led()
+
+        # Decrement status timer every frame (even when screen is asleep)
+        if self.status_timer > 0:
+            self.status_timer -= 1
+
+    def draw_frame(self):
+        """Render the frame"""
+        # Check if screen is asleep (but allow status messages to show)
+        if self.screen_asleep:
+            # Render black screen when asleep
+            self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(0, 0, 0))
+            
+            # Only show status messages even in sleep mode
+            if self.status_timer > 0:
+                # Semi-transparent background for status
+                overlay_y = HEIGHT - 60
+                self.draw.rectangle((10, overlay_y, WIDTH - 10, overlay_y + 30), fill=(40, 50, 60))
+                self.draw.text((15, overlay_y + 5), self.status_message, fill=(255, 255, 200))
+            return
+        
+        # Normal rendering when awake
+        # Clear background
+        self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=COLOR_BG)
+
+        # Draw elements
+        self.draw_face()
+        self.draw_status()
+
+    def render(self):
+        """Render to display (with rotation)"""
+        rotated = self.img.rotate(180)
+        self.display.buffer = rotated
+        self.display.display()
+
+    def cleanup(self):
+        """Clean up and clear screen"""
+        print("\nCleaning up...")
+
+        # Stop OpenClaw integration
+        if self.openclaw:
+            try:
+                self.openclaw.stop()
+                print("OpenClaw integration stopped")
+            except Exception as e:
+                pass
+
+        # Turn off LED
+        self.display.set_led(0, 0, 0)
+
+        # Clear screen
+        self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(0, 0, 0))
+        self.render()
+
+        # Give display time to update
+        time.sleep(0.1)
+
+        print("Goodbye!")
+
+    def run(self):
+        """Main loop"""
+        print("🐛 snarling Creature Started!")
+        print("Controls:")
+        print("  A: Show status summary")
+        print("  B: Trigger heartbeat check")
+        print("  X: Toggle sleep mode")
+        print("  Y: Toggle mute/quiet mode")
+        print("  Ctrl+C: Exit")
+        print()
+
+        target_fps = 30
+        frame_time = 1.0 / target_fps
+
+        try:
+            while self.running:
+                frame_start = time.time()
+
+                # Check inputs
+                self.check_buttons()
+
+                # Update state
+                self.update(frame_time)
+
+                # Draw frame
+                self.draw_frame()
+                self.render()
+
+                # Frame timing
+                elapsed = time.time() - frame_start
+                sleep_time = frame_time - elapsed
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.cleanup()
+
+
+if __name__ == "__main__":
+    creature = snarlingCreature()
+    creature.run()
+
