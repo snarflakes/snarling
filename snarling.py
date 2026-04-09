@@ -393,7 +393,7 @@ class snarlingCreature:
         try:
             import requests
             # Call OpenClaw's approval-callback webhook
-            webhook_url = "http://localhost:3000/approval-callback"
+            webhook_url = "http://localhost:18789/approval-callback"
             response_data = {
                 "request_id": request_id,
                 "approved": approved,
