@@ -387,25 +387,48 @@ class snarlingCreature:
             self.led_timer = 0
 
     def forward_approval_response(self, approved):
-        """Forward approval response to the approval server"""
+        """Forward approval response to the OpenClaw webhook"""
+        request_id = getattr(self, '_pending_approval_id', 'unknown')
+        print(f"[snarling] Forwarding approval for {request_id}: {'APPROVED' if approved else 'REJECTED'}")
         try:
             import requests
+            # Call OpenClaw's approval-callback webhook
+            webhook_url = "http://localhost:3000/api/plugins/openclaw-interaction-bridge/approval-callback"
             response_data = {
-                "request_id": getattr(self, '_pending_approval_id', 'unknown'),
-                "approved": approved
+                "request_id": request_id,
+                "approved": approved,
+                "flow_id": getattr(self, '_pending_flow_id', None)
             }
-            requests.post(
-                "http://localhost:5001/approval/response",
+            response = requests.post(
+                webhook_url,
                 json=response_data,
                 timeout=5
             )
+            print(f"[snarling] Webhook status: {response.status_code}")
+            if response.status_code == 200:
+                print(f"[snarling] OpenClaw acknowledged: {response.json().get('message', 'OK')}")
         except Exception as e:
-            print(f"[snarling] Failed to forward approval response: {e}")
+            print(f"[snarling] Webhook call failed: {e}")
+            # Fallback to old approval server for backward compatibility
+            try:
+                fallback_data = {
+                    "request_id": request_id,
+                    "approved": approved
+                }
+                fallback_response = requests.post(
+                    "http://localhost:5001/approval/response",
+                    json=fallback_data,
+                    timeout=5
+                )
+                print(f"[snarling] Fallback status: {fallback_response.status_code}")
+            except Exception as e2:
+                print(f"[snarling] Fallback also failed: {e2}")
 
-    def set_awaiting_approval(self, request_id, message):
+    def set_awaiting_approval(self, request_id, message, flow_id=None):
         """Set state to awaiting approval with request details"""
         self.state = STATE_AWAITING_APPROVAL
         self._pending_approval_id = request_id
+        self._pending_flow_id = flow_id
         self.status_message = f"APPROVAL: {message[:20]}..."
         self.status_timer = 216000  # 2 hours at 30fps (7200 * 30)
         self.led_timer = 216000  # Keep LED on for 2 hours
@@ -627,9 +650,10 @@ if FLASK_AVAILABLE and approval_app:
         
         request_id = data.get('request_id')
         message = data.get('message', 'Approval required')
+        flow_id = data.get('flow_id')  # OpenClaw TaskFlow ID
         
         if creature_instance:
-            creature_instance.set_awaiting_approval(request_id, message)
+            creature_instance.set_awaiting_approval(request_id, message, flow_id)
             print(f"[snarling] Received approval alert: {request_id}")
             return jsonify({"status": "alert_displayed"})
         else:

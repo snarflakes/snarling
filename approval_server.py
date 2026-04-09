@@ -1,52 +1,38 @@
 #!/usr/bin/env python3
 """
-Approval Server for snarling - Receives approval requests and forwards responses.
-Runs on port 5001.
+Approval Server for Snarling Display
+Receives approval requests and forwards responses back to OpenClaw
 """
 
-from flask import Flask, request, jsonify
-import requests
-import threading
 import time
+import threading
+import requests
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# Store pending approval requests
-# Format: {request_id: {timestamp, request_data}}
+# Store pending approvals
 pending_requests = {}
-
-# Callback URL for snarling display to signal when alert is shown
-SNARLING_DISPLAY_URL = "http://localhost:5000/approval/alert"
-
-# Lock for thread-safe access to pending_requests
 request_lock = threading.Lock()
 
-
-def cleanup_old_requests():
-    """Remove requests older than 5 minutes"""
-    current_time = time.time()
-    with request_lock:
-        expired = [
-            req_id for req_id, data in pending_requests.items()
-            if current_time - data.get('timestamp', 0) > 300
-        ]
-        for req_id in expired:
-            del pending_requests[req_id]
-            print(f"[approval_server] Cleaned up expired request: {req_id}")
+# OpenClaw Gateway settings
+OPENCLAW_GATEWAY_URL = "http://localhost:18789"
+OPENCLAW_GATEWAY_TOKEN = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+TARGET_SESSION_KEY = "agent:main:main"  # The main session to notify
 
 
 @app.route('/approval/request', methods=['POST'])
 def approval_request():
     """
-    Receive approval request from OpenClaw.
-    Stores request locally and signals snarling display to show alert.
+    Receive approval request from OpenClaw plugin.
+    Forwards to snarling display on port 5000.
     
     Expected JSON:
     {
         "request_id": "uuid",
-        "message": "Description of action requiring approval",
-        "callback_url": "http://callback/to/notify/openclaw",
-        "timeout_seconds": 300
+        "message": "Description of action needing approval",
+        "callback_url": "http://...",
+        "timeout_seconds": 7200
     }
     """
     data = request.json
@@ -55,57 +41,99 @@ def approval_request():
         return jsonify({"error": "No JSON data provided"}), 400
     
     request_id = data.get('request_id')
-    callback_url = data.get('callback_url')
-    message = data.get('message', 'Approval required')
+    message = data.get('message')
+    timeout = data.get('timeout_seconds', 7200)
     
-    if not request_id or not callback_url:
-        return jsonify({"error": "Missing request_id or callback_url"}), 400
+    if not request_id or not message:
+        return jsonify({"error": "Missing request_id or message"}), 400
     
-    # Store request with timestamp
+    # Store the request
     with request_lock:
         pending_requests[request_id] = {
+            'request_data': data,
             'timestamp': time.time(),
-            'request_data': data
+            'timeout': timeout
         }
     
-    print(f"[approval_server] Received approval request: {request_id}")
-    print(f"[approval_server] Message: {message}")
-    
-    # Signal snarling display to show alert
-    # Try to notify the display service
-    def forward_to_display():
-        try:
-            display_payload = {
-                'request_id': request_id,
-                'message': message,
-                'state': 'awaiting_approval'
+    # Forward to snarling display
+    try:
+        alert_payload = {
+            "request_id": request_id,
+            "message": message,
+            "timeout_seconds": timeout
+        }
+        
+        response = requests.post(
+            "http://localhost:5000/approval/alert",
+            json=alert_payload,
+            timeout=5
+        )
+        
+        if response.ok:
+            print(f"[approval_server] Forwarded alert to snarling: {request_id}")
+            return jsonify({
+                "request_id": request_id,
+                "status": "displayed"
+            })
+        else:
+            print(f"[approval_server] Snarling alert failed: {response.status_code}")
+            return jsonify({
+                "request_id": request_id,
+                "status": "failed",
+                "error": f"Snarling returned {response.status_code}"
+            }), 500
+            
+    except Exception as e:
+        print(f"[approval_server] Error forwarding to snarling: {e}")
+        return jsonify({
+            "request_id": request_id,
+            "status": "failed",
+            "error": str(e)
+        }), 500
+
+
+def notify_openclaw_session(request_id, approved, message):
+    """
+    Send a notification to the OpenClaw session using the Tools Invoke API
+    """
+    try:
+        # Call sessions_send via the Tools Invoke API
+        tool_payload = {
+            "tool": "sessions_send",
+            "sessionKey": "main",  # Use main session
+            "args": {
+                "sessionKey": TARGET_SESSION_KEY,
+                "message": f"🚨 **Approval Update**\n\nRequest: {message}\nStatus: {'✅ APPROVED' if approved else '❌ REJECTED'}\nRequest ID: {request_id}"
             }
-            response = requests.post(
-                SNARLING_DISPLAY_URL,
-                json=display_payload,
-                timeout=2
-            )
-            print(f"[approval_server] Forwarded to display: {response.status_code}")
-        except Exception as e:
-            print(f"[approval_server] Could not signal display: {e}")
-    
-    # Fire-and-forget notification to snarling display
-    threading.Thread(target=forward_to_display, daemon=True).start()
-    
-    # Clean up old requests periodically
-    threading.Thread(target=cleanup_old_requests, daemon=True).start()
-    
-    return jsonify({
-        "status": "displayed",
-        "request_id": request_id
-    })
+        }
+        
+        response = requests.post(
+            f"{OPENCLAW_GATEWAY_URL}/tools/invoke",
+            json=tool_payload,
+            headers={
+                "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            timeout=10
+        )
+        
+        if response.ok:
+            print(f"[approval_server] Notified OpenClaw session: {request_id} = {approved}")
+            return True
+        else:
+            print(f"[approval_server] Failed to notify OpenClaw: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"[approval_server] Error notifying OpenClaw: {e}")
+        return False
 
 
 @app.route('/approval/response', methods=['POST'])
 def approval_response():
     """
     Receive approval response from snarling display.
-    Forwards the decision to the original callback_url.
+    Forwards the decision to the original callback_url AND notifies OpenClaw session.
     
     Expected JSON:
     {
@@ -133,42 +161,50 @@ def approval_response():
         return jsonify({"error": "Request not found or expired"}), 404
     
     callback_url = stored['request_data'].get('callback_url')
+    message = stored['request_data'].get('message', 'Unknown action')
     
     print(f"[approval_server] Approval response for {request_id}: {'APPROVED' if approved else 'REJECTED'}")
     
-    # Forward decision to original callback
-    try:
-        forward_payload = {
-            "request_id": request_id,
-            "approved": approved,
-            "timestamp": time.time()
-        }
-        
-        response = requests.post(
-            callback_url,
-            json=forward_payload,
-            timeout=10
-        )
-        
-        # Remove from pending after forwarding
-        with request_lock:
-            pending_requests.pop(request_id, None)
-        
-        print(f"[approval_server] Forwarded to {callback_url}, status: {response.status_code}")
-        
+    # Notify OpenClaw session directly (this is the key part!)
+    notify_openclaw_session(request_id, approved, message)
+    
+    # Forward decision to original callback (if provided)
+    if callback_url and callback_url != f"http://localhost:5001/approval/response":
+        try:
+            forward_payload = {
+                "request_id": request_id,
+                "approved": approved,
+                "timestamp": time.time()
+            }
+            
+            response = requests.post(
+                callback_url,
+                json=forward_payload,
+                timeout=5
+            )
+            
+            print(f"[approval_server] Forwarded to {callback_url}, status: {response.status_code}")
+            
+            return jsonify({
+                "status": "forwarded",
+                "request_id": request_id,
+                "callback_status": response.status_code
+            })
+            
+        except Exception as e:
+            print(f"[approval_server] Failed to forward: {e}")
+            # Still return success since we notified OpenClaw
+            return jsonify({
+                "status": "notified_only",
+                "request_id": request_id,
+                "error": str(e)
+            })
+    else:
+        # No callback URL, but we notified OpenClaw
         return jsonify({
-            "status": "forwarded",
-            "request_id": request_id,
-            "callback_status": response.status_code
+            "status": "notified",
+            "request_id": request_id
         })
-        
-    except Exception as e:
-        print(f"[approval_server] Failed to forward: {e}")
-        # Keep request in pending in case we need to retry
-        return jsonify({
-            "status": "failed_to_forward",
-            "error": str(e)
-        }), 500
 
 
 @app.route('/approval/pending', methods=['GET'])
