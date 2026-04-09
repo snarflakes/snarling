@@ -29,6 +29,7 @@ STATE_SLEEPING = "sleeping"
 STATE_PROCESSING = "processing"
 STATE_COMMUNICATING = "communicating"
 STATE_ERROR = "error"
+STATE_AWAITING_APPROVAL = "awaiting_approval"
 
 # Color constants
 COLOR_BG = (20, 30, 40)
@@ -55,6 +56,9 @@ class FaceExpressions:
     # Error faces - distressed, broken
     ERROR = ['(╥☁╥ )', '(-_-\')', '(☓‿‿☓)', '(#__#)']
 
+    # Awaiting approval faces - alert, watching
+    AWAITING_APPROVAL = ['( ⚆_⚆)', '(☉_☉ )']
+
     @classmethod
     def get_faces_for_state(cls, state):
         """Get appropriate faces for a given state"""
@@ -66,6 +70,8 @@ class FaceExpressions:
             return cls.COMMUNICATING
         elif state == STATE_ERROR:
             return cls.ERROR
+        elif state == STATE_AWAITING_APPROVAL:
+            return cls.AWAITING_APPROVAL
         return cls.SLEEP
 
 class snarlingCreature:
@@ -160,6 +166,11 @@ class snarlingCreature:
                 blink = 1.0 if int(self.breath_phase * 3) % 2 == 0 else 0.4
                 blink *= 0.7  # Reduce by 30%
                 self.display.set_led(blink, 0, 0)
+            elif self.state == STATE_AWAITING_APPROVAL:
+                # Red LED flash for approval alert
+                blink = 1.0 if int(self.breath_phase * 4) % 2 == 0 else 0.2
+                blink *= 0.7  # Reduce by 30%
+                self.display.set_led(blink, 0, 0)
         else:
             # LED off
             self.display.set_led(0, 0, 0)
@@ -170,7 +181,8 @@ class snarlingCreature:
             STATE_SLEEPING: COLOR_SLEEP,
             STATE_PROCESSING: COLOR_PROCESS,
             STATE_COMMUNICATING: COLOR_COMM,
-            STATE_ERROR: COLOR_ERROR
+            STATE_ERROR: COLOR_ERROR,
+            STATE_AWAITING_APPROVAL: COLOR_ERROR  # Red for approval alert
         }
         return colors.get(self.state, COLOR_SLEEP)
 
@@ -206,6 +218,10 @@ class snarlingCreature:
             # Side to side movement
             self.animation_offset_x = int(10 * math.sin(self.breath_phase * 2))
             self.animation_offset_y = 0
+        elif self.state == STATE_AWAITING_APPROVAL:
+            # Alert movement - quick jitter
+            self.animation_offset_x = int(4 * math.sin(self.breath_phase * 6))
+            self.animation_offset_y = int(2 * math.cos(self.breath_phase * 5))
 
     def draw_face(self):
         """Draw the face expression in the center of the screen using DejaVuSansMono like pwnagotchi"""
@@ -346,6 +362,55 @@ class snarlingCreature:
         self.status_message = "Muted" if self.mute else "Unmuted"
         self.status_timer = 45
 
+    def approve_request(self):
+        """Handle approval button press (A button in approval state)"""
+        if self.state == STATE_AWAITING_APPROVAL:
+            print("[snarling] Request APPROVED by user")
+            self.status_message = "✓ APPROVED"
+            self.status_timer = 60
+            # Forward approval response
+            self.forward_approval_response(approved=True)
+            # Return to sleeping state after approval
+            self.state = STATE_SLEEPING
+            self.led_timer = 0
+
+    def reject_request(self):
+        """Handle rejection button press (B button in approval state)"""
+        if self.state == STATE_AWAITING_APPROVAL:
+            print("[snarling] Request REJECTED by user")
+            self.status_message = "✗ REJECTED"
+            self.status_timer = 60
+            # Forward approval response
+            self.forward_approval_response(approved=False)
+            # Return to sleeping state after rejection
+            self.state = STATE_SLEEPING
+            self.led_timer = 0
+
+    def forward_approval_response(self, approved):
+        """Forward approval response to the approval server"""
+        try:
+            import requests
+            response_data = {
+                "request_id": getattr(self, '_pending_approval_id', 'unknown'),
+                "approved": approved
+            }
+            requests.post(
+                "http://localhost:5001/approval/response",
+                json=response_data,
+                timeout=5
+            )
+        except Exception as e:
+            print(f"[snarling] Failed to forward approval response: {e}")
+
+    def set_awaiting_approval(self, request_id, message):
+        """Set state to awaiting approval with request details"""
+        self.state = STATE_AWAITING_APPROVAL
+        self._pending_approval_id = request_id
+        self.status_message = f"APPROVAL: {message[:20]}..."
+        self.status_timer = 300  # 10 seconds at 30fps (extendable)
+        self.led_timer = 300  # Keep LED on
+        print(f"[snarling] Awaiting approval for: {request_id}")
+
     def check_buttons(self):
         """Check for button presses"""
         buttons = {
@@ -359,15 +424,23 @@ class snarlingCreature:
             pressed = self.display.read_button(button)
 
             if pressed and not self.button_pressed[name]:
-                # Button just pressed
-                if name == 'A':
-                    self.show_status_summary()
-                elif name == 'B':
-                    self.trigger_heartbeat()
-                elif name == 'X':
-                    self.toggle_sleep_mode()
-                elif name == 'Y':
-                    self.toggle_mute()
+                # Button just pressed - check approval state first
+                if self.state == STATE_AWAITING_APPROVAL:
+                    if name == 'A':
+                        self.approve_request()
+                    elif name == 'B':
+                        self.reject_request()
+                    # X and Y don't do anything in approval state
+                else:
+                    # Normal button handling
+                    if name == 'A':
+                        self.show_status_summary()
+                    elif name == 'B':
+                        self.trigger_heartbeat()
+                    elif name == 'X':
+                        self.toggle_sleep_mode()
+                    elif name == 'Y':
+                        self.toggle_mute()
 
             self.button_pressed[name] = pressed
 
@@ -398,7 +471,10 @@ class snarlingCreature:
                     snarlingState.ERROR: STATE_ERROR,
                 }
                 new_state = state_map.get(oc_state, STATE_SLEEPING)
-                if new_state != self.state:
+                # Don't override awaiting_approval state from OpenClaw
+                if self.state == STATE_AWAITING_APPROVAL:
+                    pass  # Keep awaiting_approval state
+                elif new_state != self.state:
                     print(f"[snarling] State transition: {self.state} -> {new_state}")
                     self.state = new_state
                     # LED on for 10 seconds on state change
@@ -518,7 +594,58 @@ class snarlingCreature:
             self.cleanup()
 
 
+# Flask server for receiving approval alerts (runs in background thread)
+try:
+    from flask import Flask, request, jsonify
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
+    print("Warning: Flask not available, approval server integration disabled")
+
+approval_app = Flask(__name__) if FLASK_AVAILABLE else None
+creature_instance = None  # Will hold reference to snarlingCreature instance
+
+if FLASK_AVAILABLE and approval_app:
+    @approval_app.route('/approval/alert', methods=['POST'])
+    def approval_alert():
+        """Receive approval alert from approval server"""
+        global creature_instance
+        data = request.json
+        
+        if not data:
+            return jsonify({"error": "No JSON data"}), 400
+        
+        request_id = data.get('request_id')
+        message = data.get('message', 'Approval required')
+        
+        if creature_instance:
+            creature_instance.set_awaiting_approval(request_id, message)
+            print(f"[snarling] Received approval alert: {request_id}")
+            return jsonify({"status": "alert_displayed"})
+        else:
+            return jsonify({"error": "snarling not initialized"}), 503
+    
+    @approval_app.route('/health', methods=['GET'])
+    def approval_health():
+        """Health check for approval server"""
+        return jsonify({"status": "healthy"})
+    
+    def run_approval_server():
+        """Run Flask server in background thread"""
+        if approval_app:
+            print("[snarling] Starting approval alert server on port 5000")
+            approval_app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+
+
 if __name__ == "__main__":
     creature = snarlingCreature()
+    
+    # Start approval server in background thread if Flask is available
+    if FLASK_AVAILABLE:
+        import threading
+        creature_instance = creature
+        approval_thread = threading.Thread(target=run_approval_server, daemon=True)
+        approval_thread.start()
+    
     creature.run()
 
