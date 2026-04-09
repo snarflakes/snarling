@@ -407,8 +407,8 @@ class snarlingCreature:
         self.state = STATE_AWAITING_APPROVAL
         self._pending_approval_id = request_id
         self.status_message = f"APPROVAL: {message[:20]}..."
-        self.status_timer = 300  # 10 seconds at 30fps (extendable)
-        self.led_timer = 300  # Keep LED on
+        self.status_timer = 216000  # 2 hours at 30fps (7200 * 30)
+        self.led_timer = 216000  # Keep LED on for 2 hours
         print(f"[snarling] Awaiting approval for: {request_id}")
 
     def check_buttons(self):
@@ -500,6 +500,16 @@ class snarlingCreature:
         # Decrement status timer every frame (even when screen is asleep)
         if self.status_timer > 0:
             self.status_timer -= 1
+            # Check for approval timeout
+            if self.status_timer == 0 and self.state == STATE_AWAITING_APPROVAL:
+                print("[snarling] Approval request timed out")
+                self.status_message = "⌛ TIMEOUT"
+                self.status_timer = 60  # Show timeout message for 2 seconds
+                # Forward timeout as rejection
+                self.forward_approval_response(approved=False)
+                # Return to sleeping state
+                self.state = STATE_SLEEPING
+                self.led_timer = 0
 
     def draw_frame(self):
         """Render the frame"""

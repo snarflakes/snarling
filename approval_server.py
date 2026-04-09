@@ -73,23 +73,24 @@ def approval_request():
     
     # Signal snarling display to show alert
     # Try to notify the display service
-    try:
-        display_payload = {
-            'request_id': request_id,
-            'message': message,
-            'state': 'awaiting_approval'
-        }
-        # Fire-and-forget notification to snarling display
-        threading.Thread(
-            target=lambda: requests.post(
+    def forward_to_display():
+        try:
+            display_payload = {
+                'request_id': request_id,
+                'message': message,
+                'state': 'awaiting_approval'
+            }
+            response = requests.post(
                 SNARLING_DISPLAY_URL,
                 json=display_payload,
                 timeout=2
-            ),
-            daemon=True
-        ).start()
-    except Exception as e:
-        print(f"[approval_server] Could not signal display: {e}")
+            )
+            print(f"[approval_server] Forwarded to display: {response.status_code}")
+        except Exception as e:
+            print(f"[approval_server] Could not signal display: {e}")
+    
+    # Fire-and-forget notification to snarling display
+    threading.Thread(target=forward_to_display, daemon=True).start()
     
     # Clean up old requests periodically
     threading.Thread(target=cleanup_old_requests, daemon=True).start()
@@ -185,6 +186,26 @@ def get_pending():
                 for req_id, data in pending_requests.items()
             ]
         })
+
+
+@app.route('/approval/status/<request_id>', methods=['GET'])
+def get_approval_status(request_id):
+    """Get status of a specific approval request"""
+    with request_lock:
+        stored = pending_requests.get(request_id)
+        if stored:
+            return jsonify({
+                "request_id": request_id,
+                "status": "pending",
+                "age_seconds": int(time.time() - stored['timestamp']),
+                "message": stored['request_data'].get('message', 'N/A')
+            })
+    
+    # Not found in pending - check if it was recently completed
+    return jsonify({
+        "request_id": request_id,
+        "status": "not_found"
+    }), 404
 
 
 @app.route('/health', methods=['GET'])
