@@ -28,9 +28,15 @@ Snarling is a small screen attached to your OpenClaw host that provides ambient 
 
 Snarling runs as a service on your Raspberry Pi (or similar host) and communicates with OpenClaw via:
 
-- **State files** — Lightweight JSON status written by the agent
-- **HTTP bridge** — Direct integration via openclaw-interaction-bridge
+- **HTTP bridge** (default) — Polls the Mission Control API
+- **State files** (fallback) — Reads local JSON if no Mission Control
 - **Manual controls** — Physical buttons for interaction
+
+### Default Mode (with Mission Control)
+The Interaction Bridge plugin POSTs status to `http://localhost:3000/api/status`. Snarling polls this endpoint to display current agent state.
+
+### Fallback Mode (no Mission Control)
+Configure the bridge to write to `/home/pi/snarling/state.json` instead. Snarling reads the local file directly.
 
 ## Repos
 
@@ -104,15 +110,15 @@ Check Snarling display updates when you:
 ```
 ## Development
 
-Push changes to the `dev` branch. Merges go through `main`.
+Push changes to the `development` branch. Merges go through `main`.
 
 ```bash
-git checkout dev
+git checkout development
 git add .
 git commit -m "feature: description"
-git push origin dev
+git push origin development
 ```
 
 ## Credits
 
-To the Pwnagotchi project for its wonderful inspiration. Born from Dustytext, built by Snar.
+Thanks to the Pwnagotchi project for its wonderful inspiration. Born from Dustytext, built by Snar.
