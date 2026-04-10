@@ -6,7 +6,7 @@ A physical status companion for OpenClaw agents — a Raspberry Pi-powered displ
 
 ## What It Is
 
-Snarling is a small screen attached to your OpenClaw host that provides ambient awareness of your agent's activity. Instead of checking your phone to see if the AI is working, resting, or needs attention, you can glance at the Snarling display. Easily customize with your own screen.  Argon-one housing and Raspberry Pi 4 used for easy configuration!
+Snarling is a small screen attached to your OpenClaw host that provides ambient awareness of your agent's activity. Instead of checking your phone to see if the AI is working, resting, or needs attention, you can glance at the Snarling display. Easily customize with your own screen.  Argon-one housing and Raspberry Pi 4 used for easy configuration! + a pimoroni display HAT mini https://shop.pimoroni.com/products/display-hat-mini?variant=39496084717651.
 
 ## Features
 
@@ -44,6 +44,8 @@ Configure the bridge to write to `/home/pi/snarling/state.json` instead. Snarlin
 - **openclaw-interaction-bridge** — Plugin for OpenClaw side integration [![GitHub Repo](https://img.shields.io/badge/GitHub-openclaw--interaction--bridge-blue?logo=github)](https://github.com/snarflakes/openclaw-interaction-bridge)
 
 ## Setup
+
+Buy a screen for your raspberry pi.  Install the python display library specific to your screen. You will have to have openclaw adapt Snarling if you use a different screen.
 
 ```bash
 # Clone Snarling repo
