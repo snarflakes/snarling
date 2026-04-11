@@ -31,7 +31,7 @@ STATE_AWAITING_APPROVAL = "awaiting_approval"
 COLOR_BG = (20, 30, 40)
 COLOR_TEXT = (255, 255, 255)
 COLOR_SLEEP = (100, 150, 255)
-COLOR_PROCESS = (253, 138, 114)  # Melon
+COLOR_PROCESS = (255, 168, 148)  # Light melon
 COLOR_COMM = (0, 255, 220)
 COLOR_ERROR = (255, 80, 80)
 
@@ -140,8 +140,8 @@ class snarlingCreature:
                 brightness *= 0.7  # Reduce by 30%
                 self.display.set_led(0, brightness * 0.25, brightness * 0.5)
             elif self.state == STATE_PROCESSING:
-                # Melon LED
-                self.display.set_led(0.99, 0.54, 0.45)
+                # Melon LED (dimmed)
+                self.display.set_led(0.55, 0.30, 0.25)
             elif self.state == STATE_COMMUNICATING:
                 # Cyan pulsing
                 pulse = 0.5 + 0.5 * math.sin(self.breath_phase * 2)
