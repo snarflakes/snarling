@@ -140,8 +140,10 @@ class snarlingCreature:
                 brightness *= 0.7  # Reduce by 30%
                 self.display.set_led(0, brightness * 0.25, brightness * 0.5)
             elif self.state == STATE_PROCESSING:
-                # Melon LED (dimmed)
-                self.display.set_led(0.55, 0.30, 0.25)
+                # Melon LED hum (slow pulse)
+                pulse = 0.3 + 0.25 * math.sin(self.breath_phase * 1.5)
+                pulse *= 0.7  # Reduce by 30%
+                self.display.set_led(pulse * 0.99, pulse * 0.54, pulse * 0.45)
             elif self.state == STATE_COMMUNICATING:
                 # Cyan pulsing
                 pulse = 0.5 + 0.5 * math.sin(self.breath_phase * 2)
