@@ -13,12 +13,8 @@ import signal
 import sys
 
 # Import OpenClaw integration
-try:
-    from snarling_openclaw import OpenClawIntegration, snarlingState
-    OPENCLAW_AVAILABLE = True
-except ImportError:
-    OPENCLAW_AVAILABLE = False
-    print("Warning: OpenClaw integration not available")
+# OpenClaw polling client removed — state is now set via direct /state API from the plugin
+OPENCLAW_AVAILABLE = False
 
 # Screen dimensions
 WIDTH = DisplayHATMini.WIDTH
@@ -104,17 +100,7 @@ class snarlingCreature:
         # LED timer for state change indication
         self.led_timer = 0
 
-        # OpenClaw integration (disabled — state is now set via direct /state API from the plugin)
-        self.openclaw = None
-        self.openclaw_connected = False
-        # if OPENCLAW_AVAILABLE:
-        #     try:
-        #         self.openclaw = OpenClawIntegration()
-        #         self.openclaw.start()
-        #         self.openclaw_connected = True
-        #         print("OpenClaw integration started")
-        #     except Exception as e:
-        #         print(f"Failed to start OpenClaw integration: {e}")
+
 
         # Initialize display
         self.img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG)
@@ -511,48 +497,7 @@ class snarlingCreature:
         # Update face animation
         self.update_face(dt)
 
-        # Poll OpenClaw state if available
-        # Only apply state from polling client if the direct /state endpoint
-        # hasn't been used recently (within last 15 seconds). This prevents the
-        # polling client from overriding state set directly via the API.
-        if self.openclaw and self.openclaw_connected:
-            try:
-                oc_state = self.openclaw.get_state()
-                # Debug logging
-                print(f"[snarling] OpenClaw state: {oc_state.value}, Current state: {self.state}")
-                
-                # Map OpenClaw states to snarling states
-                state_map = {
-                    snarlingState.SLEEPING: STATE_SLEEPING,
-                    snarlingState.PROCESSING: STATE_PROCESSING,
-                    snarlingState.COMMUNICATING: STATE_COMMUNICATING,
-                    snarlingState.ERROR: STATE_ERROR,
-                }
-                new_state = state_map.get(oc_state, STATE_SLEEPING)
-                # Don't override awaiting_approval state from OpenClaw
-                if self.state == STATE_AWAITING_APPROVAL:
-                    pass  # Keep awaiting_approval state
-                elif new_state != self.state:
-                    # Only apply polling state if direct_state_timeout has expired
-                    if not hasattr(self, 'direct_state_time') or (time.time() - self.direct_state_time > 15):
-                        print(f"[snarling] State transition: {self.state} -> {new_state}")
-                        self.state = new_state
-                        # LED on for 10 seconds on state change
-                        # When going to sleeping/idle, turn LED off immediately
-                        if new_state == STATE_SLEEPING:
-                            self.led_timer = 0
-                        else:
-                            self.led_timer = 10
-                        # Update face immediately on state change
-                        faces = FaceExpressions.get_faces_for_state(self.state)
-                        if faces:
-                            self.face_index = 0
-                            self.current_face = faces[0]
-                    self.face_timer = 0
-            except Exception as e:
-                print(f"[snarling] OpenClaw error: {e}")
-                # Degrade gracefully
-                pass
+        # State is now set via direct /state API from the plugin (no polling)
 
         # Update LED
         self.update_led()
@@ -633,13 +578,7 @@ class snarlingCreature:
         """Clean up and clear screen"""
         print("\nCleaning up...")
 
-        # Stop OpenClaw integration
-        if self.openclaw:
-            try:
-                self.openclaw.stop()
-                print("OpenClaw integration stopped")
-            except Exception as e:
-                pass
+
 
         # Turn off LED
         self.display.set_led(0, 0, 0)
