@@ -8,6 +8,8 @@ A physical status companion for OpenClaw agents — a Raspberry Pi-powered displ
 
 Snarling is a small screen attached to your OpenClaw host that provides ambient awareness of your agent's activity. Instead of checking your phone to see if the AI is working, resting, or needs attention, you can glance at the Snarling display. Easily customize with your own screen.  Argon-one housing and Raspberry Pi 4 used for easy configuration! + a pimoroni display HAT mini https://shop.pimoroni.com/products/display-hat-mini?variant=39496084717651.
 
+![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a689-4948-94ee-bfa1f3cf6c29)
+
 ## Features
 
 ### Status Display
