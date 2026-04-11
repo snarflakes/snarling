@@ -311,20 +311,37 @@ class snarlingCreature:
             # Semi-transparent background (2x taller, grows upward from original position)
             overlay_bottom = HEIGHT - 30
             overlay_top = overlay_bottom - 60
-            self.draw.rectangle((0, overlay_top, WIDTH - 20, overlay_bottom), fill=(40, 50, 60))
-            # Status text (2x size, bold)
+            overlay_left = 5
+            overlay_right = WIDTH - 20
+            self.draw.rectangle((0, overlay_top, overlay_right, overlay_bottom), fill=(40, 50, 60))
+            # Status text (regular weight, 24pt)
             try:
                 status_font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
                 )
             except OSError:
-                try:
-                    status_font = ImageFont.truetype(
-                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
-                    )
-                except OSError:
-                    status_font = ImageFont.load_default()
-            self.draw.text((5, overlay_top + 15), self.status_message, fill=(255, 255, 255), font=status_font)
+                status_font = ImageFont.load_default()
+            # Word-wrap text within the box
+            max_width = overlay_right - overlay_left - 5
+            words = self.status_message.split(' ')
+            lines = []
+            current_line = ''
+            for word in words:
+                test_line = f'{current_line} {word}'.strip() if current_line else word
+                bbox = status_font.getbbox(test_line)
+                if bbox[2] - bbox[0] > max_width and current_line:
+                    lines.append(current_line)
+                    current_line = word
+                else:
+                    current_line = test_line
+            if current_line:
+                lines.append(current_line)
+            y = overlay_top + 5
+            for line in lines:
+                if y + 24 > overlay_bottom:
+                    break
+                self.draw.text((overlay_left, y), line, fill=(255, 255, 255), font=status_font)
+                y += 24
 
     def show_status_summary(self):
         """Show detailed status summary"""
@@ -561,19 +578,36 @@ class snarlingCreature:
                 # Semi-transparent background (2x taller, grows upward)
                 overlay_bottom = HEIGHT - 30
                 overlay_top = overlay_bottom - 60
-                self.draw.rectangle((0, overlay_top, WIDTH - 20, overlay_bottom), fill=(40, 50, 60))
+                overlay_left = 5
+                overlay_right = WIDTH - 20
+                self.draw.rectangle((0, overlay_top, overlay_right, overlay_bottom), fill=(40, 50, 60))
                 try:
                     status_font = ImageFont.truetype(
-                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
                     )
                 except OSError:
-                    try:
-                        status_font = ImageFont.truetype(
-                            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
-                        )
-                    except OSError:
-                        status_font = ImageFont.load_default()
-                self.draw.text((5, overlay_top + 15), self.status_message, fill=(255, 255, 255), font=status_font)
+                    status_font = ImageFont.load_default()
+                # Word-wrap text within the box
+                max_width = overlay_right - overlay_left - 5
+                words = self.status_message.split(' ')
+                lines = []
+                current_line = ''
+                for word in words:
+                    test_line = f'{current_line} {word}'.strip() if current_line else word
+                    bbox = status_font.getbbox(test_line)
+                    if bbox[2] - bbox[0] > max_width and current_line:
+                        lines.append(current_line)
+                        current_line = word
+                    else:
+                        current_line = test_line
+                if current_line:
+                    lines.append(current_line)
+                y = overlay_top + 5
+                for line in lines:
+                    if y + 24 > overlay_bottom:
+                        break
+                    self.draw.text((overlay_left, y), line, fill=(255, 255, 255), font=status_font)
+                    y += 24
             return
         
         # Normal rendering when awake
