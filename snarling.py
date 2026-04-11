@@ -310,7 +310,12 @@ class snarlingCreature:
         if self.status_timer > 0:
             # Semi-transparent background (2x larger)
             overlay_y = HEIGHT - 120
-            self.draw.rectangle((20, overlay_y, WIDTH - 20, overlay_y + 60), fill=(40, 50, 60))
+            overlay_w = WIDTH - 40
+            overlay_h = 60
+            # Create RGBA overlay for alpha blending
+            overlay = Image.new('RGBA', (overlay_w, overlay_h), (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            overlay_draw.rectangle((0, 0, overlay_w, overlay_h), fill=(40, 50, 60, 180))
             # Status text (2x size, bold)
             try:
                 status_font = ImageFont.truetype(
@@ -323,7 +328,9 @@ class snarlingCreature:
                     )
                 except OSError:
                     status_font = ImageFont.load_default()
-            self.draw.text((30, overlay_y + 15), self.status_message, fill=(255, 255, 200), font=status_font)
+            overlay_draw.text((10, 10), self.status_message, fill=(255, 255, 200), font=status_font)
+            self.img = Image.alpha_composite(self.img.convert('RGBA'), overlay if overlay.mode == 'RGBA' else overlay.convert('RGBA'))
+            self.draw = ImageDraw.Draw(self.img)
 
     def show_status_summary(self):
         """Show detailed status summary"""
@@ -557,10 +564,27 @@ class snarlingCreature:
             
             # Only show status messages even in sleep mode
             if self.status_timer > 0:
-                # Semi-transparent background for status
-                overlay_y = HEIGHT - 60
-                self.draw.rectangle((10, overlay_y, WIDTH - 10, overlay_y + 30), fill=(40, 50, 60))
-                self.draw.text((15, overlay_y + 5), self.status_message, fill=(255, 255, 200))
+                # Semi-transparent background for status (2x larger)
+                overlay_y = HEIGHT - 120
+                overlay_w = WIDTH - 40
+                overlay_h = 60
+                overlay = Image.new('RGBA', (overlay_w, overlay_h), (0, 0, 0, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                overlay_draw.rectangle((0, 0, overlay_w, overlay_h), fill=(40, 50, 60, 180))
+                try:
+                    status_font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
+                    )
+                except OSError:
+                    try:
+                        status_font = ImageFont.truetype(
+                            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
+                        )
+                    except OSError:
+                        status_font = ImageFont.load_default()
+                overlay_draw.text((10, 10), self.status_message, fill=(255, 255, 200), font=status_font)
+                self.img = Image.alpha_composite(self.img.convert('RGBA'), overlay)
+                self.draw = ImageDraw.Draw(self.img)
             return
         
         # Normal rendering when awake
