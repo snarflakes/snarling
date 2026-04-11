@@ -324,7 +324,7 @@ class snarlingCreature:
                     )
                 except OSError:
                     status_font = ImageFont.load_default()
-            self.draw.text((5, overlay_top + 15), self.status_message, fill=(255, 255, 200), font=status_font)
+            self.draw.text((5, overlay_top + 15), self.status_message, fill=(255, 255, 255), font=status_font)
 
     def show_status_summary(self):
         """Show detailed status summary"""
@@ -573,7 +573,7 @@ class snarlingCreature:
                         )
                     except OSError:
                         status_font = ImageFont.load_default()
-                self.draw.text((5, overlay_top + 15), self.status_message, fill=(255, 255, 200), font=status_font)
+                self.draw.text((5, overlay_top + 15), self.status_message, fill=(255, 255, 255), font=status_font)
             return
         
         # Normal rendering when awake
