@@ -512,6 +512,9 @@ class snarlingCreature:
         self.update_face(dt)
 
         # Poll OpenClaw state if available
+        # Only apply state from polling client if the direct /state endpoint
+        # hasn't been used recently (within last 15 seconds). This prevents the
+        # polling client from overriding state set directly via the API.
         if self.openclaw and self.openclaw_connected:
             try:
                 oc_state = self.openclaw.get_state()
@@ -530,19 +533,21 @@ class snarlingCreature:
                 if self.state == STATE_AWAITING_APPROVAL:
                     pass  # Keep awaiting_approval state
                 elif new_state != self.state:
-                    print(f"[snarling] State transition: {self.state} -> {new_state}")
-                    self.state = new_state
-                    # LED on for 10 seconds on state change
-                    # When going to sleeping/idle, turn LED off immediately
-                    if new_state == STATE_SLEEPING:
-                        self.led_timer = 0
-                    else:
-                        self.led_timer = 10
-                    # Update face immediately on state change
-                    faces = FaceExpressions.get_faces_for_state(self.state)
-                    if faces:
-                        self.face_index = 0
-                        self.current_face = faces[0]
+                    # Only apply polling state if direct_state_timeout has expired
+                    if not hasattr(self, 'direct_state_time') or (time.time() - self.direct_state_time > 15):
+                        print(f"[snarling] State transition: {self.state} -> {new_state}")
+                        self.state = new_state
+                        # LED on for 10 seconds on state change
+                        # When going to sleeping/idle, turn LED off immediately
+                        if new_state == STATE_SLEEPING:
+                            self.led_timer = 0
+                        else:
+                            self.led_timer = 10
+                        # Update face immediately on state change
+                        faces = FaceExpressions.get_faces_for_state(self.state)
+                        if faces:
+                            self.face_index = 0
+                            self.current_face = faces[0]
                     self.face_timer = 0
             except Exception as e:
                 print(f"[snarling] OpenClaw error: {e}")
@@ -724,6 +729,48 @@ if FLASK_AVAILABLE and approval_app:
     def approval_health():
         """Health check for approval server"""
         return jsonify({"status": "healthy"})
+
+    @approval_app.route('/state', methods=['POST'])
+    def set_state():
+        """Set creature state directly (called by OpenClaw plugin)"""
+        global creature_instance
+        data = request.json
+
+        if not data:
+            return jsonify({"error": "No JSON data"}), 400
+
+        state = data.get('state', '').lower()
+        valid_states = [STATE_SLEEPING, STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR]
+
+        if state not in valid_states:
+            return jsonify({"error": f"Invalid state. Must be one of: {valid_states}"}), 400
+
+        if creature_instance:
+            # Mark time so the render loop knows a direct state was set recently
+            creature_instance.direct_state_time = time.time()
+            # Don't override awaiting_approval state unless explicitly setting it
+            if creature_instance.state == STATE_AWAITING_APPROVAL and state != STATE_AWAITING_APPROVAL:
+                return jsonify({"status": "ignored", "reason": "awaiting_approval"})
+
+            if state != creature_instance.state:
+                old_state = creature_instance.state
+                creature_instance.state = state
+                # Update face immediately on state change
+                faces = FaceExpressions.get_faces_for_state(state)
+                if faces:
+                    creature_instance.face_index = 0
+                    creature_instance.current_face = faces[0]
+                    creature_instance.face_timer = 0
+                # LED on for 10 seconds on state change, off when sleeping
+                if state == STATE_SLEEPING:
+                    creature_instance.led_timer = 0
+                else:
+                    creature_instance.led_timer = 10
+                print(f"[snarling] State set via API: {old_state} -> {state}")
+
+            return jsonify({"status": "ok", "state": state})
+        else:
+            return jsonify({"error": "snarling not initialized"}), 503
     
     def run_approval_server():
         """Run Flask server in background thread"""
