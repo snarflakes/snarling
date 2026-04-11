@@ -393,7 +393,8 @@ class snarlingCreature:
         try:
             import requests
             # Call OpenClaw's approval-callback webhook
-            webhook_url = "http://localhost:18789/approval-callback"
+            gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+            webhook_url = "http://localhost:18789/approval-callback?sessionKey=agent:main:main"
             response_data = {
                 "request_id": request_id,
                 "approved": approved,
@@ -402,6 +403,7 @@ class snarlingCreature:
             response = requests.post(
                 webhook_url,
                 json=response_data,
+                headers={"Authorization": f"Bearer {gateway_token}"},
                 timeout=5
             )
             print(f"[snarling] Webhook status: {response.status_code}")
