@@ -180,6 +180,10 @@ def approval_response():
             response = requests.post(
                 callback_url,
                 json=forward_payload,
+                headers={
+                    "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
+                    "Content-Type": "application/json"
+                },
                 timeout=5
             )
             
