@@ -311,7 +311,7 @@ class snarlingCreature:
             # Semi-transparent background (2x taller, grows upward from original position)
             overlay_bottom = HEIGHT - 30
             overlay_top = overlay_bottom - 60
-            self.draw.rectangle((20, overlay_top, WIDTH - 20, overlay_bottom), fill=(40, 50, 60))
+            self.draw.rectangle((0, overlay_top, WIDTH - 20, overlay_bottom), fill=(40, 50, 60))
             # Status text (2x size, bold)
             try:
                 status_font = ImageFont.truetype(
@@ -324,7 +324,7 @@ class snarlingCreature:
                     )
                 except OSError:
                     status_font = ImageFont.load_default()
-            self.draw.text((30, overlay_top + 15), self.status_message, fill=(255, 255, 200), font=status_font)
+            self.draw.text((5, overlay_top + 15), self.status_message, fill=(255, 255, 200), font=status_font)
 
     def show_status_summary(self):
         """Show detailed status summary"""
@@ -561,7 +561,7 @@ class snarlingCreature:
                 # Semi-transparent background (2x taller, grows upward)
                 overlay_bottom = HEIGHT - 30
                 overlay_top = overlay_bottom - 60
-                self.draw.rectangle((20, overlay_top, WIDTH - 20, overlay_bottom), fill=(40, 50, 60))
+                self.draw.rectangle((0, overlay_top, WIDTH - 20, overlay_bottom), fill=(40, 50, 60))
                 try:
                     status_font = ImageFont.truetype(
                         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
@@ -573,7 +573,7 @@ class snarlingCreature:
                         )
                     except OSError:
                         status_font = ImageFont.load_default()
-                self.draw.text((30, overlay_top + 15), self.status_message, fill=(255, 255, 200), font=status_font)
+                self.draw.text((5, overlay_top + 15), self.status_message, fill=(255, 255, 200), font=status_font)
             return
         
         # Normal rendering when awake
