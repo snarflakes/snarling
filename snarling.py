@@ -308,22 +308,10 @@ class snarlingCreature:
 
         # Status message overlay
         if self.status_timer > 0:
-            # Semi-transparent background (2x larger)
-            overlay_y = HEIGHT - 120
-            self.draw.rectangle((20, overlay_y, WIDTH - 20, overlay_y + 60), fill=(40, 50, 60))
-            # Status text (2x size, bold)
-            try:
-                status_font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
-                )
-            except OSError:
-                try:
-                    status_font = ImageFont.truetype(
-                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
-                    )
-                except OSError:
-                    status_font = ImageFont.load_default()
-            self.draw.text((30, overlay_y + 15), self.status_message, fill=(255, 255, 200), font=status_font)
+            # Semi-transparent background
+            overlay_y = HEIGHT - 60
+            self.draw.rectangle((10, overlay_y, WIDTH - 10, overlay_y + 30), fill=(40, 50, 60))
+            self.draw.text((15, overlay_y + 5), self.status_message, fill=(255, 255, 200))
 
     def show_status_summary(self):
         """Show detailed status summary"""
