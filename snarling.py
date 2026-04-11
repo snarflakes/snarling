@@ -104,17 +104,17 @@ class snarlingCreature:
         # LED timer for state change indication
         self.led_timer = 0
 
-        # OpenClaw integration
+        # OpenClaw integration (disabled — state is now set via direct /state API from the plugin)
         self.openclaw = None
         self.openclaw_connected = False
-        if OPENCLAW_AVAILABLE:
-            try:
-                self.openclaw = OpenClawIntegration()
-                self.openclaw.start()
-                self.openclaw_connected = True
-                print("OpenClaw integration started")
-            except Exception as e:
-                print(f"Failed to start OpenClaw integration: {e}")
+        # if OPENCLAW_AVAILABLE:
+        #     try:
+        #         self.openclaw = OpenClawIntegration()
+        #         self.openclaw.start()
+        #         self.openclaw_connected = True
+        #         print("OpenClaw integration started")
+        #     except Exception as e:
+        #         print(f"Failed to start OpenClaw integration: {e}")
 
         # Initialize display
         self.img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG)
