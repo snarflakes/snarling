@@ -102,7 +102,6 @@ class snarlingCreature:
 
 
 
-
         # Initialize display
         self.img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG)
         self.draw = ImageDraw.Draw(self.img)
@@ -295,41 +294,8 @@ class snarlingCreature:
         state_text = f"State: {self.state.upper()}"
         self.draw.text((WIDTH - 120, HEIGHT - 25), state_text, fill=(200, 200, 200))
 
-        # Approval alternating banners
-        if self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners'):
-            # Advance banner timer and swap
-            self._approval_banner_timer += 1
-            if self._approval_banner_timer >= self._approval_banner_interval:
-                self._approval_banner_timer = 0
-                self._approval_banner_index = (self._approval_banner_index + 1) % len(self._approval_banners)
-
-            try:
-                header_font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
-                )
-                msg_font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
-                )
-            except OSError:
-                header_font = ImageFont.load_default()
-                msg_font = header_font
-
-            # Banner background
-            overlay_bottom = HEIGHT - 30
-            overlay_top = overlay_bottom - 60
-            self.draw.rectangle((0, overlay_top, WIDTH, overlay_bottom), fill=(60, 20, 20))
-
-            # Current banner (two lines)
-            lines = self._approval_banners[self._approval_banner_index]
-            is_banner1 = (self._approval_banner_index == 0)
-            top_font = header_font if is_banner1 else msg_font
-            bottom_font = header_font if is_banner1 else msg_font
-            self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 200, 200), font=top_font)
-            if lines[1]:
-                self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=bottom_font)
-
-        # Status message overlay (non-approval)
-        elif self.status_timer > 0:
+        # Status message overlay
+        if self.status_timer > 0:
             # Semi-transparent background (2x taller, grows upward from original position)
             overlay_bottom = HEIGHT - 30
             overlay_top = overlay_bottom - 60
@@ -483,49 +449,8 @@ class snarlingCreature:
         self.state = STATE_AWAITING_APPROVAL
         self._pending_approval_id = request_id
         self._pending_flow_id = flow_id
-        # The message arrives as "action: description" from the approval server
-        # Split on first ": " to separate action from description
-        if ": " in message and not message.startswith(" "):
-            parts = message.split(": ", 1)
-            action_text = parts[0]
-            desc_text = parts[1]
-        else:
-            action_text = "Approve?"
-            desc_text = message
-        # Word-wrap each line to max_chars characters, breaking at word boundaries
-        max_chars = 29
-        def word_wrap(text, max_len):
-            words = text.split()
-            lines = []
-            current = ""
-            for word in words:
-                test = f"{current} {word}".strip()
-                if len(test) <= max_len:
-                    current = test
-                else:
-                    if current:
-                        lines.append(current)
-                    current = word[:max_len-2] + ".." if len(word) > max_len else word
-            if current:
-                lines.append(current)
-            return lines
-        # Banner 1: Approve header + action name
-        # Banner 2: message word-wrapped across both lines
-        header = "Approve? A=Yes B=No"
-        action_lines = word_wrap(action_text, 24)
-        while len(action_lines) < 1:
-            action_lines.append("")
-        banner1 = [header, action_lines[0]]
-        # Banner 2: description word-wrapped across two lines
-        desc_lines = word_wrap(desc_text, max_chars)
-        while len(desc_lines) < 2:
-            desc_lines.append("")
-        banner2 = [desc_lines[0], desc_lines[1]]
-        self._approval_banners = [banner1, banner2]
-        self._approval_banner_index = 0
-        self._approval_banner_timer = 0
-        self._approval_banner_interval = 45  # frames per banner (~1.5s at 30fps)
-        self.status_timer = 216000  # 2 hours at 30fps
+        self.status_message = f"APPROVAL: {message[:20]}..."
+        self.status_timer = 216000  # 2 hours at 30fps (7200 * 30)
         self.led_timer = 216000  # Keep LED on for 2 hours
         print(f"[snarling] Awaiting approval for: {request_id}")
 
