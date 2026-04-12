@@ -15,6 +15,9 @@ app = Flask(__name__)
 pending_requests = {}
 request_lock = threading.Lock()
 
+# Resolution counters
+approval_counts = {"approved": 0, "rejected": 0}
+
 # OpenClaw Gateway settings
 OPENCLAW_GATEWAY_URL = "http://localhost:18789"
 OPENCLAW_GATEWAY_TOKEN = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
@@ -165,6 +168,12 @@ def approval_response():
     
     print(f"[approval_server] Approval response for {request_id}: {'APPROVED' if approved else 'REJECTED'}")
     
+    # Update counter
+    with request_lock:
+        key = "approved" if approved else "rejected"
+        approval_counts[key] += 1
+        print(f"[approval_server] Running total — approved: {approval_counts['approved']}, rejected: {approval_counts['rejected']}")
+    
     # Notify OpenClaw session directly (this is the key part!)
     notify_openclaw_session(request_id, approved, message)
     
@@ -217,6 +226,7 @@ def get_pending():
     with request_lock:
         return jsonify({
             "pending_count": len(pending_requests),
+            "resolved": approval_counts,
             "requests": [
                 {
                     "request_id": req_id,
