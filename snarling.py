@@ -569,7 +569,7 @@ class snarlingCreature:
 
         # Update LED timer
         if self.led_timer > 0:
-            self.led_timer -= dt
+            self.led_timer = max(0, self.led_timer - dt)
 
         # Update face animation
         self.update_face(dt)
