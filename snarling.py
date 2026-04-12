@@ -81,6 +81,9 @@ class snarlingCreature:
         self.think_dots = 0
         self.talk_frame = 0
         self.running = True
+
+        # Approval resolution counters
+        self.approval_counts = {"approved": 0, "rejected": 0}
         self.status_message = ""
         self.status_timer = 0
 
@@ -418,6 +421,8 @@ class snarlingCreature:
         """Handle approval button press (A button in approval state)"""
         if self.state == STATE_AWAITING_APPROVAL:
             print("[snarling] Request APPROVED by user")
+            self.approval_counts["approved"] += 1
+            print(f"[snarling] Running total — approved: {self.approval_counts['approved']}, rejected: {self.approval_counts['rejected']}")
             self.status_message = "✓ APPROVED"
             self.status_timer = 60
             # Forward approval response
@@ -430,6 +435,8 @@ class snarlingCreature:
         """Handle rejection button press (B button in approval state)"""
         if self.state == STATE_AWAITING_APPROVAL:
             print("[snarling] Request REJECTED by user")
+            self.approval_counts["rejected"] += 1
+            print(f"[snarling] Running total — approved: {self.approval_counts['approved']}, rejected: {self.approval_counts['rejected']}")
             self.status_message = "✗ REJECTED"
             self.status_timer = 60
             # Forward approval response
@@ -745,6 +752,14 @@ if FLASK_AVAILABLE and approval_app:
     def approval_health():
         """Health check for approval server"""
         return jsonify({"status": "healthy"})
+
+    @approval_app.route('/counts', methods=['GET'])
+    def get_counts():
+        """Get approval resolution counts"""
+        if creature_instance:
+            return jsonify({"resolved": creature_instance.approval_counts})
+        else:
+            return jsonify({"error": "snarling not initialized"}), 503
 
     @approval_app.route('/state', methods=['POST'])
     def set_state():
