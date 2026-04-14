@@ -6,10 +6,6 @@
 
 Inspired by [Pwnagotchi](https://pwnagotchi.ai/), built for OpenClaw.
 
-Snarling is a small screen attached to your OpenClaw host that provides ambient awareness of your agent's activity. Instead of checking your phone to see if the AI is working, resting, or needs attention, you can glance at the Snarling display. Easily customize with your own screen.  Argon-one housing and Raspberry Pi 4 used for easy configuration! + a pimoroni display HAT mini https://shop.pimoroni.com/products/display-hat-mini?variant=39496084717651.
-
-![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a689-4948-94ee-bfa1f3cf6c29)
-
 ## What It Does
 
 Snarling is a tiny creature on a tiny screen. It reacts to your agent's state in real time — sleeping when idle, focused when processing, chatty when responding, and alert when it needs your approval on something.
@@ -73,6 +69,7 @@ Approvals are forwarded back to OpenClaw via the gateway webhook, so your agent 
 - **Computer:** Raspberry Pi 4 (recommended)
 - **Case:** Argon One V2 (fits nicely, keeps it cool)
 - **Rotation:** 180° (configured in software)
+![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a689-4948-94ee-bfa1f3cf6c29)
 
 ## Setup
 
