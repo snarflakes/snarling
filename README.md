@@ -1,120 +1,156 @@
 # Snarling 🐾
 
-<img width="800" height="800" alt="ChatGPT Image Apr 8, 2026, 04_43_57 PM" src="https://github.com/user-attachments/assets/6a5f9196-0bcd-40ef-b045-28a8a6755dbb" />
+<img width="800" height="800" alt="Snarling" src="https://github.com/user-attachments/assets/6a5f9196-0bcd-40ef-b045-28a8a6755dbb" />
 
-A physical status companion for OpenClaw agents — a Raspberry Pi-powered display that shows what your AI is up to, even when you're not watching the chat.
+**A physical status companion for OpenClaw agents.** A Raspberry Pi-powered display that lives on your desk and shows what your AI is doing — even when you're not looking at a screen.
 
-## What It Is
+Inspired by [Pwnagotchi](https://pwnagotchi.ai/), built for OpenClaw.
 
 Snarling is a small screen attached to your OpenClaw host that provides ambient awareness of your agent's activity. Instead of checking your phone to see if the AI is working, resting, or needs attention, you can glance at the Snarling display. Easily customize with your own screen.  Argon-one housing and Raspberry Pi 4 used for easy configuration! + a pimoroni display HAT mini https://shop.pimoroni.com/products/display-hat-mini?variant=39496084717651.
 
 ![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a689-4948-94ee-bfa1f3cf6c29)
 
-## Features
+## What It Does
 
-### Status Display
-- **Active indicator** — Shows when your agent is talking, researching, or resting
+Snarling is a tiny creature on a tiny screen. It reacts to your agent's state in real time — sleeping when idle, focused when processing, chatty when responding, and alert when it needs your approval on something.
 
-### Interactive Buttons
-| Button | Short Press | Long Press |
-|--------|-------------|-----------|
-| X | Turn off display
+Instead of checking your phone or terminal to see if your agent is working, resting, or needs attention — just glance at Snarling.
 
-### Future Ideas
-- **Approval bridge** — Physically approve/reject agent actions via buttons
-- **Motion detection** — Wake display when you approach
-- **Audio feedback** — Gentle sounds for status changes
-- **Thermal camera** — Detect presence and room temperature
+## States & Faces
+
+| State | Face | When |
+|-------|------|------|
+| **Sleeping** | `(⇀‿‿↼)` | Agent is idle |
+| **Processing** | `(◕‿‿◕)` | Agent is using tools / thinking |
+| **Communicating** | `(ᵔ◡◡ᵔ)` | Agent is generating a response |
+| **Error** | `(╥☁╥ )` | Something went wrong |
+| **Awaiting Approval** | `( ⚆_⚆)` | Agent needs your yes/no decision |
+
+Each state has its own color, LED pattern, and animation — breathing blue when sleeping, pulsing melon when processing, flashing red when approval is needed.
+
+## Physical Approvals
+
+Snarling isn't just a display — it's an input device. When your agent needs approval for an action (deleting a file, sending a message, etc.), Snarling enters **awaiting approval** state and shows the request on screen.
+
+| Button | Normal Mode | Approval Mode |
+|--------|-------------|---------------|
+| **A** | Show status summary | ✅ **Approve** |
+| **B** | Trigger heartbeat | ❌ **Reject** |
+| **X** | Toggle sleep mode | — |
+| **Y** | Toggle mute mode | — |
+
+Approvals are forwarded back to OpenClaw via the gateway webhook, so your agent can proceed (or not) immediately.
 
 ## Architecture
 
-Snarling runs as a service on your Raspberry Pi (or similar host) and communicates with OpenClaw via:
+```
+┌─────────────┐     HTTP POST      ┌──────────────┐    button press    ┌──────────┐
+│  OpenClaw    │ ────────────────── │  Snarling     │ ────────────────► │  OpenClaw │
+│  (plugin)    │   /state (port 5000)│  Display      │   webhook         │  Gateway  │
+│              │                    │  + Buttons    │                   │          │
+└─────────────┘                    └──────────────┘                   └──────────┘
+```
 
-- **HTTP bridge** (default) — Polls the Mission Control API
-- **State files** (fallback) — Reads local JSON if no Mission Control
-- **Manual controls** — Physical buttons for interaction
+**How it works:**
 
-### Default Mode (with Mission Control)
-The Interaction Bridge plugin POSTs status to `http://localhost:3000/api/status`. Snarling polls this endpoint to display current agent state.
+1. The [OpenClaw Interaction Bridge plugin](https://github.com/snarflakes/openclaw-interaction-bridge) watches your agent's activity
+2. It POSTs state changes to Snarling's `/state` endpoint on port 5000
+3. Snarling updates the display, LED, and face expression in real time
+4. For approvals, OpenClaw sends the request to Snarling's `/approval/alert` endpoint
+5. When you press A (approve) or B (reject), Snarling POSTs the decision back to the OpenClaw gateway
 
-### Fallback Mode (no Mission Control)
-Configure the bridge to write to `/home/pi/snarling/state.json` instead. Snarling reads the local file directly.
+### Components
 
-## Repos
+| File | Purpose |
+|------|---------|
+| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server for state/approval API |
+| `approval_server.py` | Standalone approval relay — receives requests from OpenClaw, forwards to Snarling display, relays responses back |
+| `snarling-tracker.py` | State time tracker with health score calculation (future gamification) |
 
-- **snarling** — This repo (hardware display, button handling)
-- **openclaw-interaction-bridge** — Plugin for OpenClaw side integration [![GitHub Repo](https://img.shields.io/badge/GitHub-openclaw--interaction--bridge-blue?logo=github)](https://github.com/snarflakes/openclaw-interaction-bridge)
+## Hardware
+
+- **Display:** [Pimoroni Display HAT Mini](https://shop.pimoroni.com/products/display-hat-mini) (320×240 IPS)
+- **Computer:** Raspberry Pi 4 (recommended)
+- **Case:** Argon One V2 (fits nicely, keeps it cool)
+- **Rotation:** 180° (configured in software)
 
 ## Setup
 
+### 1. Install Snarling
 Buy a screen for your raspberry pi.  Install the python display library specific to your screen. You will have to have openclaw adapt Snarling if you use a different screen.
 
 ```bash
-# Clone Snarling repo
 git clone https://github.com/snarflakes/snarling.git
 cd snarling
-# Install service
+
+# Install dependencies
+pip install flask pillow requests
+
+# Enable as systemd service
 sudo cp snarling.service /etc/systemd/system/
 sudo systemctl enable snarling
 sudo systemctl start snarling
 ```
 
-- For updated agent status, you need to install the companion openclaw-interaction-bridge plugin. Found here: [![GitHub Repo](https://img.shields.io/badge/GitHub-openclaw--interaction--bridge-blue?logo=github)](https://github.com/snarflakes/openclaw-interaction-bridge)
+### 2. Install the Interaction Bridge Plugin
 
-- Lastly you need to build the status "host" which stores the status from the openclaw-interaction-bridge.  Add it to your own mission-control, either way feed this prompt to your agent:
+Snarling needs the [openclaw-interaction-bridge](https://github.com/snarflakes/openclaw-interaction-bridge) plugin to receive state updates from OpenClaw.
+
+[![GitHub Repo](https://img.shields.io/badge/GitHub-openclaw--interaction--bridge-blue?logo=github)](https://github.com/snarflakes/openclaw-interaction-bridge)
+
+### 3. (Optional) Enable the Approval Server
+
+If you want physical button approvals:
+
+```bash
+sudo cp approval-server.service /etc/systemd/system/
+sudo systemctl enable approval-server
+sudo systemctl start approval-server
 ```
-You are now running with the OpenClaw Interaction Bridge plugin enabled.
 
-## What's Already Set Up
+### 4. Configure Your Agent
 
-- Interaction Bridge plugin installed at `~/.openclaw/extensions/openclaw-interaction-bridge`
-- Snarling display hardware ready and polling for status
-- Mission Control API running at `http://localhost:3000/api/status`
+Add this to your agent's context (or system prompt):
 
-## What Happens Automatically
+> You are now running with the OpenClaw Interaction Bridge plugin enabled.
+> 
+> - Bridge plugin installed at `~/.openclaw/extensions/openclaw-interaction-bridge`
+> - Snarling display hardware ready and polling for status
+> - State updates POST to `http://localhost:5000/state`
+> - Approval alerts POST to `http://localhost:5000/approval/alert`
 
-The bridge watches your OpenClaw activity and reports state changes:
+### 5. Verify
 
-| Event | Status Sent | Snarling Shows |
-|-------|-------------|----------------|
-| You start using tools | `processing` | Working indicator |
-| You begin replying | `speaking` | Active/talking |
-| 30 seconds idle | `idle` | Resting state |
+Check the display updates when you:
+- Run a tool → shows **processing**
+- Generate a response → shows **communicating**
+- Wait 30 seconds → shows **sleeping**
+- Request user approval → shows **awaiting approval** with the request on screen
 
-## For Users WITH Mission Control
+## API Endpoints
 
-Snarling should poll: `http://your-pi-ip:3000/api/status`
+Snarling runs a Flask server on port 5000:
 
-Mission Control handles the state file and serves it to Snarling.
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/state` | POST | Set creature state (`sleeping`, `processing`, `communicating`, `error`) |
+| `/approval/alert` | POST | Display an approval request on screen |
+| `/counts` | GET | Get lifetime approve/reject counts |
+| `/health` | GET | Health check |
 
-## For Users WITHOUT Mission Control
+The approval server (port 5001) provides an additional relay layer:
 
-If you don't have Mission Control running, configure the bridge to write 
-directly to Snarling's state file:
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/approval/request` | POST | Receive approval request from plugin, forward to display |
+| `/approval/response` | POST | Receive approval response, notify OpenClaw session |
+| `/approval/pending` | GET | List pending approval requests |
+| `/approval/status/<id>` | GET | Check status of a specific request |
+| `/health` | GET | Health check |
 
-Edit `~/.openclaw/extensions/openclaw-interaction-bridge/index.ts`:
-
-Change:
-  const MISSION_CONTROL_URL = "http://localhost:3000/api/status"
-
-To:
-  const STATE_FILE_PATH = "/home/pi/snarling/state.json"
-
-Then modify `updateState()` to write JSON to that file instead of HTTP POST.
-
-Snarling will read the local file directly.
-
-## Verify It's Working
-
-Check Snarling display updates when you:
-- Run a tool (shows "processing")
-- Generate a response (shows "speaking")
-- Wait 30 seconds (shows "idle")
-
-```
 ## Development
 
-Push changes to the `development` branch. Merges go through `main`.
+Push to `development`, merge through `main`.
 
 ```bash
 git checkout development
@@ -125,4 +161,6 @@ git push origin development
 
 ## Credits
 
-Thanks to the Pwnagotchi project for its wonderful inspiration. Born from Dustytext, built by Snar.
+- Inspired by [Pwnagotchi](https://pwnagotchi.ai/) — the idea of a tiny creature that reacts to what's happening
+- Born from [Dustytext](https://dustytext.com), a blockchain world-building experiment
+- Built by [Snar](https://github.com/snarflakes)
