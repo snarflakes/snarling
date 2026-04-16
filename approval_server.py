@@ -55,6 +55,8 @@ def approval_request():
             'timeout': timeout
         }
     
+    print(f'[approval_server] Stored request {request_id}, data keys: {list(data.keys())}, secret: {data.get("secret", "MISSING")}')
+    
     # Forward to snarling display
     try:
         alert_payload = {
@@ -161,9 +163,11 @@ def approval_response():
         return jsonify({"error": "Request not found or expired"}), 404
     
     callback_url = stored['request_data'].get('callback_url')
+    callback_secret = stored['request_data'].get('secret')
     message = stored['request_data'].get('message', 'Unknown action')
     
     print(f"[approval_server] Approval response for {request_id}: {'APPROVED' if approved else 'REJECTED'}")
+    print(f"[approval_server] callback_secret from stored data: {callback_secret}")
     
     # Notify OpenClaw session directly (this is the key part!)
     notify_openclaw_session(request_id, approved, message)
@@ -174,6 +178,7 @@ def approval_response():
             forward_payload = {
                 "request_id": request_id,
                 "approved": approved,
+                "secret": callback_secret,
                 "timestamp": time.time()
             }
             
