@@ -35,32 +35,34 @@ Snarling isn't just a display — it's an input device. When your agent needs ap
 | **X** | Toggle sleep mode | — |
 | **Y** | Toggle mute mode | — |
 
-Approvals are forwarded back to OpenClaw via the gateway webhook, so your agent can proceed (or not) immediately.
+When you press A or B, Snarling POSTs the decision back to the OpenClaw gateway's `/approval-callback` route, then sends a WebSocket RPC wake so the agent picks up the result immediately (~5 seconds total latency).
 
 ## Architecture
 
 ```
-┌─────────────┐     HTTP POST      ┌──────────────┐    button press    ┌──────────┐
-│  OpenClaw    │ ────────────────── │  Snarling     │ ────────────────► │  OpenClaw │
-│  (plugin)    │   /state (port 5000)│  Display      │   webhook         │  Gateway  │
-│              │                    │  + Buttons    │                   │          │
-└─────────────┘                    └──────────────┘                   └──────────┘
+┌─────────────┐     HTTP POST      ┌──────────────┐   button press    ┌──────────────┐
+│  OpenClaw    │ ────────────────── │  Snarling     │ ───────────────► │  OpenClaw    │
+│  (plugin)    │   /state (5000)   │  Display      │  webhook + WS    │  Gateway     │
+│              │ ────────────────── │  + Buttons    │  wake           │              │
+│              │   /approval/alert  │               │                  │              │
+└─────────────┘                    └──────────────┘                  └──────────────┘
 ```
 
 **How it works:**
 
 1. The [OpenClaw Interaction Bridge plugin](https://github.com/snarflakes/openclaw-interaction-bridge) watches your agent's activity
 2. It POSTs state changes to Snarling's `/state` endpoint on port 5000
-3. Snarling updates the display, LED, and face expression in real time
-4. For approvals, OpenClaw sends the request to Snarling's `/approval/alert` endpoint
+3. It POSTs approval requests to Snarling's `/approval/alert` endpoint (direct, no middleman)
+4. Snarling updates the display, LED, and face expression in real time
 5. When you press A (approve) or B (reject), Snarling POSTs the decision back to the OpenClaw gateway
+6. Snarling sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
 
 ### Components
 
 | File | Purpose |
 |------|---------|
-| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server for state/approval API |
-| `approval_server.py` | Standalone approval relay — receives requests from OpenClaw, forwards to Snarling display, relays responses back |
+| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server for state/approval API, WebSocket wake on approval |
+| `approval_server.py` | **Vestigial** — standalone approval relay from when Snarling used a two-process architecture. The plugin now talks directly to Snarling on port 5000. This file is kept for reference but is no longer needed. |
 | `snarling-tracker.py` | State time tracker with health score calculation (future gamification) |
 
 ## Hardware
@@ -69,43 +71,33 @@ Approvals are forwarded back to OpenClaw via the gateway webhook, so your agent 
 - **Computer:** Raspberry Pi 4 (recommended)
 - **Case:** Argon One V2 (fits nicely, keeps it cool)
 - **Rotation:** 180° (configured in software)
-![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a689-4948-94ee-bfa1f3cf6c29)
+![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a789-4948-94ee-bfa1f3cf6c29)
 
 ## Setup
 
 ### 1. Install Snarling
-Buy a screen for your raspberry pi.  Install the python display library specific to your screen. You will have to have openclaw adapt Snarling if you use a different screen.
+
+Buy a screen for your raspberry pi. Install the python display library specific to your screen. You will have to have openclaw adapt Snarling if you use a different screen.
 
 ```bash
 git clone https://github.com/snarflakes/snarling.git
 cd snarling
 
 # Install dependencies
-pip install flask pillow requests
+pip install flask pillow requests websocket-client
 
-# Enable as systemd service
-sudo cp snarling.service /etc/systemd/system/
-sudo systemctl enable snarling
-sudo systemctl start snarling
+# Snarling is managed by myscript — auto-restarts on crash/kill
+# To run manually for testing:
+python snarling.py
 ```
 
 ### 2. Install the Interaction Bridge Plugin
 
-Snarling needs the [openclaw-interaction-bridge](https://github.com/snarflakes/openclaw-interaction-bridge) plugin to receive state updates from OpenClaw.
+Snarling needs the [openclaw-interaction-bridge](https://github.com/snarflakes/openclaw-interaction-bridge) plugin to receive state updates and send approval responses.
 
 [![GitHub Repo](https://img.shields.io/badge/GitHub-openclaw--interaction--bridge-blue?logo=github)](https://github.com/snarflakes/openclaw-interaction-bridge)
 
-### 3. (Optional) Enable the Approval Server
-
-If you want physical button approvals:
-
-```bash
-sudo cp approval-server.service /etc/systemd/system/
-sudo systemctl enable approval-server
-sudo systemctl start approval-server
-```
-
-### 4. Configure Your Agent
+### 3. Configure Your Agent
 
 Add this to your agent's context (or system prompt):
 
@@ -116,12 +108,12 @@ Add this to your agent's context (or system prompt):
 > - State updates POST to `http://localhost:5000/state`
 > - Approval alerts POST to `http://localhost:5000/approval/alert`
 
-### 5. Verify
+### 4. Verify
 
 Check the display updates when you:
 - Run a tool → shows **processing**
 - Generate a response → shows **communicating**
-- Wait 30 seconds → shows **sleeping**
+- Wait 10 seconds → shows **sleeping**
 - Request user approval → shows **awaiting approval** with the request on screen
 
 ## API Endpoints
@@ -135,15 +127,7 @@ Snarling runs a Flask server on port 5000:
 | `/counts` | GET | Get lifetime approve/reject counts |
 | `/health` | GET | Health check |
 
-The approval server (port 5001) provides an additional relay layer:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/approval/request` | POST | Receive approval request from plugin, forward to display |
-| `/approval/response` | POST | Receive approval response, notify OpenClaw session |
-| `/approval/pending` | GET | List pending approval requests |
-| `/approval/status/<id>` | GET | Check status of a specific request |
-| `/health` | GET | Health check |
+The approval server on port 5001 (`approval_server.py`) is **vestigial** and no longer required — the plugin talks directly to Snarling on port 5000.
 
 ## Development
 
@@ -152,7 +136,7 @@ Push to `development`, merge through `main`.
 ```bash
 git checkout development
 git add .
-git commit -m "feature: description"
+git commit -m "feat: description"
 git push origin development
 ```
 
