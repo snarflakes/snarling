@@ -69,7 +69,7 @@ When you press A or B, Snarling POSTs the decision back to the OpenClaw gateway'
 - **Computer:** Raspberry Pi 4 (recommended)
 - **Case:** Argon One V2 (fits nicely, keeps it cool)
 - **Rotation:** 180° (configured in software)
-![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a789-4948-94ee-bfa1f3cf6c29)
+![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a689-4948-94ee-bfa1f3cf6c29)
 
 ## Setup
 
