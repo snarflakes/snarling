@@ -11,6 +11,7 @@ import time
 import math
 import signal
 import sys
+import json
 
 # Import OpenClaw integration
 # OpenClaw polling client removed — state is now set via direct /state API from the plugin
@@ -448,18 +449,21 @@ class snarlingCreature:
     def forward_approval_response(self, approved):
         """Forward approval response to the OpenClaw webhook"""
         request_id = getattr(self, '_pending_approval_id', 'unknown')
-        print(f"[snarling] Forwarding approval for {request_id}: {'APPROVED' if approved else 'REJECTED'}")
+        session_key = getattr(self, '_pending_session_key', None) or 'agent:main:main'
+        print(f"[snarling] Forwarding approval for {request_id}: {'APPROVED' if approved else 'REJECTED'} (sessionKey={session_key})")
         try:
-            import requests
+            import requests as req_lib
             # Call OpenClaw's approval-callback webhook
             gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
-            webhook_url = "http://localhost:18789/approval-callback?sessionKey=agent:main:main"
+            webhook_url = f"http://localhost:18789/approval-callback?sessionKey={session_key}"
             response_data = {
                 "request_id": request_id,
                 "approved": approved,
+                "secret": getattr(self, '_pending_approval_secret', None),
+                "sessionKey": session_key,
                 "flow_id": getattr(self, '_pending_flow_id', None)
             }
-            response = requests.post(
+            response = req_lib.post(
                 webhook_url,
                 json=response_data,
                 headers={"Authorization": f"Bearer {gateway_token}"},
@@ -468,28 +472,66 @@ class snarlingCreature:
             print(f"[snarling] Webhook status: {response.status_code}")
             if response.status_code == 200:
                 print(f"[snarling] OpenClaw acknowledged: {response.json().get('message', 'OK')}")
+
+            # Wake approach: After the webhook callback, use the OpenClaw WebSocket RPC
+            # API to trigger a heartbeat. This is a separate process (snarling), so it
+            # bypasses the "requests-in-flight" issue that internal plugin wake calls
+            # suffer from. The WebSocket protocol requires a challenge-response handshake.
+            try:
+                import threading
+                import json as json_mod
+                
+                def delayed_wake():
+                    import time
+                    time.sleep(2)  # Wait for webhook handler + session lane to fully unwind
+                    try:
+                        import websocket
+                        ws = websocket.create_connection(
+                            'ws://127.0.0.1:18789/ws',
+                            timeout=10,
+                            header=['Authorization: Bearer ' + gateway_token]
+                        )
+                        # Handle challenge-response handshake
+                        challenge_raw = ws.recv()
+                        challenge_data = json_mod.loads(challenge_raw)
+                        if challenge_data.get('event') == 'connect.challenge':
+                            nonce = challenge_data['payload']['nonce']
+                            ws.send(json_mod.dumps({'type': 'response', 'payload': {'nonce': nonce}}))
+                            print(f'[snarling] WebSocket challenge completed')
+                        else:
+                            print(f'[snarling] Unexpected first message: {str(challenge_raw)[:100]}')
+                        
+                        # Trigger immediate heartbeat via RPC
+                        hb_msg = json_mod.dumps({
+                            'type': 'rpc',
+                            'method': 'system.runHeartbeatOnce',
+                            'params': {
+                                'sessionKey': session_key,
+                                'reason': 'hook:approval',
+                                'heartbeat': {'target': 'last'}
+                            }
+                        })
+                        ws.send(hb_msg)
+                        hb_result = ws.recv()
+                        print(f'[snarling] Heartbeat trigger result: {str(hb_result)[:200]}')
+                        ws.close()
+                    except Exception as e:
+                        print(f'[snarling] WebSocket wake failed: {e}')
+                
+                wake_thread = threading.Thread(target=delayed_wake, daemon=True)
+                wake_thread.start()
+            except Exception as wake_err:
+                print(f'[snarling] Delayed wake setup failed: {wake_err}')
         except Exception as e:
             print(f"[snarling] Webhook call failed: {e}")
-            # Fallback to old approval server for backward compatibility
-            try:
-                fallback_data = {
-                    "request_id": request_id,
-                    "approved": approved
-                }
-                fallback_response = requests.post(
-                    "http://localhost:5001/approval/response",
-                    json=fallback_data,
-                    timeout=5
-                )
-                print(f"[snarling] Fallback status: {fallback_response.status_code}")
-            except Exception as e2:
-                print(f"[snarling] Fallback also failed: {e2}")
 
-    def set_awaiting_approval(self, request_id, message, flow_id=None):
+    def set_awaiting_approval(self, request_id, message, flow_id=None, callback_secret=None, session_key=None):
         """Set state to awaiting approval with request details"""
         self.state = STATE_AWAITING_APPROVAL
         self._pending_approval_id = request_id
         self._pending_flow_id = flow_id
+        self._pending_approval_secret = callback_secret
+        self._pending_session_key = session_key
         # The message arrives as "action: description" from the approval server
         # Split on first ": " to separate action from description
         if ": " in message and not message.startswith(" "):
@@ -740,10 +782,12 @@ if FLASK_AVAILABLE and approval_app:
         request_id = data.get('request_id')
         message = data.get('message', 'Approval required')
         flow_id = data.get('flow_id')  # OpenClaw TaskFlow ID
+        callback_secret = data.get('secret')  # Secret for webhook callback auth
+        session_key = data.get('sessionKey')  # Session key for callback routing
         
         if creature_instance:
-            creature_instance.set_awaiting_approval(request_id, message, flow_id)
-            print(f"[snarling] Received approval alert: {request_id}")
+            creature_instance.set_awaiting_approval(request_id, message, flow_id, callback_secret=callback_secret, session_key=session_key)
+            print(f"[snarling] Received approval alert: {request_id} (sessionKey={session_key})")
             return jsonify({"status": "alert_displayed"})
         else:
             return jsonify({"error": "snarling not initialized"}), 503
