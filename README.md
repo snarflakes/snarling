@@ -62,8 +62,6 @@ When you press A or B, Snarling POSTs the decision back to the OpenClaw gateway'
 | File | Purpose |
 |------|---------|
 | `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server for state/approval API, WebSocket wake on approval |
-| `approval_server.py` | **Vestigial** — standalone approval relay from when Snarling used a two-process architecture. The plugin now talks directly to Snarling on port 5000. This file is kept for reference but is no longer needed. |
-| `snarling-tracker.py` | State time tracker with health score calculation (future gamification) |
 
 ## Hardware
 
@@ -127,7 +125,7 @@ Snarling runs a Flask server on port 5000:
 | `/counts` | GET | Get lifetime approve/reject counts |
 | `/health` | GET | Health check |
 
-The approval server on port 5001 (`approval_server.py`) is **vestigial** and no longer required — the plugin talks directly to Snarling on port 5000.
+> The approval server on port 5001 (`approval_server.py`) has been removed. The plugin talks directly to Snarling on port 5000.
 
 ## Development
 
