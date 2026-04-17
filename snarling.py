@@ -323,14 +323,20 @@ class snarlingCreature:
             overlay_top = overlay_bottom - 60
             self.draw.rectangle((0, overlay_top, WIDTH, overlay_bottom), fill=(60, 20, 20))
 
-            # Current banner (two lines)
+            # Current banner
             lines = self._approval_banners[self._approval_banner_index]
             is_banner1 = (self._approval_banner_index == 0)
-            top_font = header_font if is_banner1 else msg_font
-            bottom_font = header_font if is_banner1 else msg_font
-            self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 200, 200), font=top_font)
-            if lines[1]:
-                self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=bottom_font)
+
+            if is_banner1:
+                # Banner 1: red top header + white bottom detail
+                self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 200, 200), font=header_font)
+                if lines[1]:
+                    self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=msg_font)
+            else:
+                # Banner 2: two lines, same style (no red/white split)
+                self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 255, 255), font=msg_font)
+                if lines[1]:
+                    self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=msg_font)
 
         # Status message overlay (non-approval)
         elif self.status_timer > 0:
@@ -538,9 +544,11 @@ class snarlingCreature:
             parts = message.split(": ", 1)
             action_text = parts[0]
             desc_text = parts[1]
+            print(f"[snarling] Split message - action: '{action_text}', desc: '{desc_text}'")
         else:
             action_text = "Approve?"
             desc_text = message
+            print(f"[snarling] No ': ' found, full message as desc: '{message}'")
         # Word-wrap each line to max_chars characters, breaking at word boundaries
         max_chars = 29
         def word_wrap(text, max_len):
@@ -570,6 +578,8 @@ class snarlingCreature:
         while len(desc_lines) < 2:
             desc_lines.append("")
         banner2 = [desc_lines[0], desc_lines[1]]
+        print(f"[snarling] Banner1: {banner1}")
+        print(f"[snarling] Banner2: {banner2}")
         self._approval_banners = [banner1, banner2]
         self._approval_banner_index = 0
         self._approval_banner_timer = 0
