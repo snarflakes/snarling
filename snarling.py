@@ -318,19 +318,33 @@ class snarlingCreature:
                 header_font = ImageFont.load_default()
                 msg_font = header_font
 
-            # Banner background
-            overlay_bottom = HEIGHT - 30
-            overlay_top = overlay_bottom - 60
-            self.draw.rectangle((0, overlay_top, WIDTH, overlay_bottom), fill=(60, 20, 20))
-
-            # Current banner (two lines)
+            # Banner background - height adapts to content
+            # Banner 1: 60px (2 lines), anchored above status bar
+            # Banner 2: 80px (3 lines), extends down over status bar area
             lines = self._approval_banners[self._approval_banner_index]
             is_banner1 = (self._approval_banner_index == 0)
-            top_font = header_font if is_banner1 else msg_font
-            bottom_font = header_font if is_banner1 else msg_font
-            self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 200, 200), font=top_font)
-            if lines[1]:
-                self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=bottom_font)
+            if is_banner1:
+                banner_height = 60
+                overlay_top = HEIGHT - 30 - banner_height
+                overlay_bottom = HEIGHT - 30
+            else:
+                banner_height = 80
+                # Banner 2: same top as banner 1, but extends down into status bar area
+                overlay_top = HEIGHT - 30 - 60  # Same top as banner 1
+                overlay_bottom = overlay_top + banner_height  # = HEIGHT - 10
+            self.draw.rectangle((0, overlay_top, WIDTH, overlay_bottom), fill=(60, 20, 20))
+
+            if is_banner1:
+                # Banner 1: red top header + white bottom detail
+                self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 200, 200), font=header_font)
+                if lines[1]:
+                    self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=msg_font)
+            else:
+                # Banner 2: up to 3 lines, same style (no red/white split)
+                line_height = 22
+                for i in range(min(len(lines), 3)):
+                    y = overlay_top + 4 + (i * line_height)
+                    self.draw.text((10, y), lines[i], fill=(255, 255, 255), font=msg_font)
 
         # Status message overlay (non-approval)
         elif self.status_timer > 0:
@@ -538,38 +552,63 @@ class snarlingCreature:
             parts = message.split(": ", 1)
             action_text = parts[0]
             desc_text = parts[1]
+            print(f"[snarling] Split message - action: '{action_text}', desc: '{desc_text}'")
         else:
             action_text = "Approve?"
             desc_text = message
-        # Word-wrap each line to max_chars characters, breaking at word boundaries
-        max_chars = 29
-        def word_wrap(text, max_len):
+            print(f"[snarling] No ': ' found, full message as desc: '{message}'")
+        # Word-wrap each line to fit within pixel width, breaking at word boundaries
+        # Banner text starts at x=10, display is 320px wide → usable = 310px
+        usable_width = 310
+        def word_wrap(text, font, max_width):
+            """Word-wrap text to fit within max_width pixels using the given font."""
             words = text.split()
             lines = []
             current = ""
             for word in words:
-                test = f"{current} {word}".strip()
-                if len(test) <= max_len:
+                test = f"{current} {word}".strip() if current else word
+                bbox = font.getbbox(test)
+                text_width = bbox[2] - bbox[0]
+                if text_width <= max_width:
                     current = test
                 else:
                     if current:
                         lines.append(current)
-                    current = word[:max_len-2] + ".." if len(word) > max_len else word
+                    # If single word is too wide, truncate with ellipsis
+                    word_bbox = font.getbbox(word)
+                    word_width = word_bbox[2] - word_bbox[0]
+                    if word_width > max_width:
+                        current = word[:len(word)//2] + ".."
+                    else:
+                        current = word
             if current:
                 lines.append(current)
             return lines
+        # Load fonts for pixel-accurate word wrapping
+        try:
+            wrap_header_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
+            )
+            wrap_msg_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
+            )
+        except OSError:
+            wrap_header_font = ImageFont.load_default()
+            wrap_msg_font = wrap_header_font
         # Banner 1: Approve header + action name
-        # Banner 2: message word-wrapped across both lines
+        # Banner 2: message word-wrapped across two lines
         header = "Approve? A=Yes B=No"
-        action_lines = word_wrap(action_text, 24)
+        action_lines = word_wrap(action_text, wrap_header_font, max_width=300)
         while len(action_lines) < 1:
             action_lines.append("")
         banner1 = [header, action_lines[0]]
         # Banner 2: description word-wrapped across two lines
-        desc_lines = word_wrap(desc_text, max_chars)
-        while len(desc_lines) < 2:
+        desc_lines = word_wrap(desc_text, wrap_msg_font, max_width=usable_width)
+        while len(desc_lines) < 3:
             desc_lines.append("")
-        banner2 = [desc_lines[0], desc_lines[1]]
+        banner2 = desc_lines[:3]
+        print(f"[snarling] Banner1: {banner1}")
+        print(f"[snarling] Banner2: {banner2}")
         self._approval_banners = [banner1, banner2]
         self._approval_banner_index = 0
         self._approval_banner_timer = 0
