@@ -35,12 +35,36 @@ STATE_AWAITING_APPROVAL = "awaiting_approval"
 STATE_NOTIFYING = "notifying"
 
 # Color constants
-COLOR_BG = (20, 30, 40)
+COLOR_BG = (26, 26, 46)       # Deep charcoal #1A1A2E
 COLOR_TEXT = (255, 255, 255)
 COLOR_SLEEP = (100, 150, 255)
 COLOR_PROCESS = (255, 168, 148)  # Light melon
 COLOR_COMM = (0, 255, 220)
 COLOR_ERROR = (255, 80, 80)
+
+# New design system colors
+COLOR_BG_NEW = (26, 26, 46)        # Deep charcoal #1A1A2E
+COLOR_INNER_FRAME = (255, 255, 255) # White inner frame
+COLOR_BUTTON_INDICATOR = (80, 80, 100)  # Soft grey for button hints
+COLOR_STATUS_BOX = (255, 255, 255)  # White status boxes
+COLOR_STATUS_DIM = (60, 60, 80)    # Dim/off status boxes
+COLOR_BANNER_BG = (42, 42, 62)    # Slightly lighter dark for banner area #2A2A3E
+COLOR_SEPARATOR = (255, 255, 255)  # White separator line
+
+# Design system dimensions
+BORDER_MARGIN = 5             # Outer border margin from screen edges
+BORDER_RADIUS = 18            # Outer border corner radius
+BORDER_WIDTH = 5              # Outer border stroke width
+INNER_FRAME_INSET = 3         # Inner frame inset from outer border
+INNER_FRAME_WIDTH = 1         # Inner frame stroke width
+BUTTON_W = 20                 # Button indicator width
+BUTTON_H = 14                 # Button indicator height
+BUTTON_RADIUS = 4             # Button indicator corner radius
+BUTTON_MARGIN = 8             # Button indicator margin from inner frame
+STATUS_BOX_SIZE = 8           # Status box size (px)
+STATUS_BOX_GAP = 4            # Gap between status boxes
+STATUS_BOX_Y = 0              # Will be calculated relative to top
+BANNER_HEIGHT = 80            # Banner area height when visible
 
 # Notification LED colors by priority
 NOTIFY_LED_COLORS = {
@@ -161,7 +185,7 @@ class snarlingCreature:
 
 
         # Initialize display
-        self.img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG)
+        self.img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG_NEW)
         self.draw = ImageDraw.Draw(self.img)
         self.display = DisplayHATMini(self.img)
 
@@ -333,6 +357,190 @@ class snarlingCreature:
                 self.animation_offset_y = int(6 * math.sin(self.breath_phase * 0.8))
                 self.animation_offset_x = 0
 
+    def _is_banner_active(self):
+        """Check if a banner (notification, approval, or status message) is currently active."""
+        return (
+            (self.state == STATE_NOTIFYING and self._notify_active) or
+            (self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners')) or
+            self.status_timer > 0
+        )
+
+    def draw_background(self):
+        """Fill the entire screen with deep charcoal background"""
+        self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=COLOR_BG_NEW)
+
+    def draw_outer_border(self):
+        """Draw the mood-colored rounded rectangle outer border"""
+        color = self.get_color()
+        # Outer border: rounded rectangle with thick stroke
+        self.draw.rounded_rectangle(
+            (BORDER_MARGIN, BORDER_MARGIN, WIDTH - BORDER_MARGIN, HEIGHT - BORDER_MARGIN),
+            radius=BORDER_RADIUS,
+            outline=color,
+            width=BORDER_WIDTH
+        )
+
+    def draw_inner_frame(self):
+        """Draw thin white inner frame for double-border effect"""
+        inset = BORDER_MARGIN + INNER_FRAME_INSET
+        self.draw.rounded_rectangle(
+            (inset, inset, WIDTH - inset, HEIGHT - inset),
+            radius=BORDER_RADIUS - 2,
+            outline=COLOR_INNER_FRAME,
+            width=INNER_FRAME_WIDTH
+        )
+
+    def draw_button_indicators(self):
+        """Draw 4 soft grey button indicators in corners: Y (top-left), B (top-right), X (bottom-left), A (bottom-right)
+        Top two (Y, B) always visible.
+        Bottom two (X, A) visible only when banner is hidden.
+        """
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1  # Inside inner frame
+        x_left = inset + BUTTON_MARGIN
+        x_right = WIDTH - inset - BUTTON_MARGIN - BUTTON_W
+        y_top = inset + BUTTON_MARGIN
+        y_bottom = HEIGHT - inset - BUTTON_MARGIN - BUTTON_H
+
+        # Button label font (tiny)
+        try:
+            btn_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 10
+            )
+        except OSError:
+            btn_font = ImageFont.load_default()
+
+        # Top-left: Y (always visible)
+        self.draw.rounded_rectangle(
+            (x_left, y_top, x_left + BUTTON_W, y_top + BUTTON_H),
+            radius=BUTTON_RADIUS,
+            fill=COLOR_BUTTON_INDICATOR
+        )
+        # Label
+        lbl_bbox = self.draw.textbbox((0, 0), "Y", font=btn_font)
+        lbl_w = lbl_bbox[2] - lbl_bbox[0]
+        lbl_h = lbl_bbox[3] - lbl_bbox[1]
+        self.draw.text(
+            (x_left + (BUTTON_W - lbl_w) // 2, y_top + (BUTTON_H - lbl_h) // 2 - 1),
+            "Y", fill=(200, 200, 220), font=btn_font
+        )
+
+        # Top-right: B (always visible)
+        self.draw.rounded_rectangle(
+            (x_right, y_top, x_right + BUTTON_W, y_top + BUTTON_H),
+            radius=BUTTON_RADIUS,
+            fill=COLOR_BUTTON_INDICATOR
+        )
+        lbl_bbox = self.draw.textbbox((0, 0), "B", font=btn_font)
+        lbl_w = lbl_bbox[2] - lbl_bbox[0]
+        lbl_h = lbl_bbox[3] - lbl_bbox[1]
+        self.draw.text(
+            (x_right + (BUTTON_W - lbl_w) // 2, y_top + (BUTTON_H - lbl_h) // 2 - 1),
+            "B", fill=(200, 200, 220), font=btn_font
+        )
+
+        # Bottom-left: X (only when no banner)
+        banner_active = (
+            (self.state == STATE_NOTIFYING and self._notify_active) or
+            (self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners')) or
+            self.status_timer > 0
+        )
+        if not banner_active:
+            self.draw.rounded_rectangle(
+                (x_left, y_bottom, x_left + BUTTON_W, y_bottom + BUTTON_H),
+                radius=BUTTON_RADIUS,
+                fill=COLOR_BUTTON_INDICATOR
+            )
+            lbl_bbox = self.draw.textbbox((0, 0), "X", font=btn_font)
+            lbl_w = lbl_bbox[2] - lbl_bbox[0]
+            lbl_h = lbl_bbox[3] - lbl_bbox[1]
+            self.draw.text(
+                (x_left + (BUTTON_W - lbl_w) // 2, y_bottom + (BUTTON_H - lbl_h) // 2 - 1),
+                "X", fill=(200, 200, 220), font=btn_font
+            )
+
+            # Bottom-right: A (only when no banner)
+            self.draw.rounded_rectangle(
+                (x_right, y_bottom, x_right + BUTTON_W, y_bottom + BUTTON_H),
+                radius=BUTTON_RADIUS,
+                fill=COLOR_BUTTON_INDICATOR
+            )
+            lbl_bbox = self.draw.textbbox((0, 0), "A", font=btn_font)
+            lbl_w = lbl_bbox[2] - lbl_bbox[0]
+            lbl_h = lbl_bbox[3] - lbl_bbox[1]
+            self.draw.text(
+                (x_right + (BUTTON_W - lbl_w) // 2, y_bottom + (BUTTON_H - lbl_h) // 2 - 1),
+                "A", fill=(200, 200, 220), font=btn_font
+            )
+
+    def draw_status_boxes(self):
+        """Draw 5 status squares at top center based on state:
+        - Processing: fill progressively (1/5, 2/5, etc.)
+        - Idle/communicating: all 5 solid white
+        - Sleeping: all dim/off
+        - Approval: all 5 solid red
+        - Notification: fill based on priority count
+        """
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        total_width = 5 * STATUS_BOX_SIZE + 4 * STATUS_BOX_GAP
+        start_x = (WIDTH - total_width) // 2
+        y = inset + BUTTON_MARGIN + BUTTON_H + 6  # Below button indicators
+
+        # Determine fill level and color
+        if self.state == STATE_SLEEPING:
+            fill_count = 0
+            box_color = COLOR_STATUS_DIM
+        elif self.state == STATE_PROCESSING:
+            # Progressive fill: cycle through 1-5 based on animation
+            fill_count = (self.face_index % 5) + 1
+            box_color = COLOR_STATUS_BOX
+        elif self.state == STATE_AWAITING_APPROVAL:
+            fill_count = 5
+            box_color = COLOR_ERROR  # Red
+        elif self.state == STATE_NOTIFYING and self._notify_active:
+            # Fill based on priority: high=5, normal=3, low=1
+            priority_fill = {'high': 5, 'normal': 3, 'low': 1}
+            fill_count = priority_fill.get(self._notify_priority, 3)
+            notify_box_colors = {
+                'high': (255, 140, 50),    # warm red-orange
+                'normal': (255, 200, 80),   # yellow-orange
+                'low': (200, 200, 100),      # soft yellow
+            }
+            box_color = notify_box_colors.get(self._notify_priority, (255, 200, 80))
+        else:
+            # Idle / communicating / error: all 5 solid
+            fill_count = 5
+            box_color = COLOR_STATUS_BOX
+
+        for i in range(5):
+            x = start_x + i * (STATUS_BOX_SIZE + STATUS_BOX_GAP)
+            color = box_color if i < fill_count else COLOR_STATUS_DIM
+            self.draw.rounded_rectangle(
+                (x, y, x + STATUS_BOX_SIZE, y + STATUS_BOX_SIZE),
+                radius=1,
+                fill=color
+            )
+
+    def draw_separator(self):
+        """Draw thin white horizontal line between face area and banner area.
+        Only visible when banner is active."""
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        sep_y = HEIGHT - inset - BANNER_HEIGHT
+        self.draw.line(
+            (inset + 4, sep_y, WIDTH - inset - 4, sep_y),
+            fill=COLOR_SEPARATOR,
+            width=1
+        )
+
+    def draw_banner_background(self):
+        """Draw the slightly differentiated background for the banner area.
+        Only visible when banner is active."""
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        sep_y = HEIGHT - inset - BANNER_HEIGHT
+        self.draw.rectangle(
+            (inset + 1, sep_y + 1, WIDTH - inset - 1, HEIGHT - inset - 1),
+            fill=COLOR_BANNER_BG
+        )
+
     def draw_face(self):
         """Draw the face expression in the center of the screen using DejaVuSansMono like pwnagotchi"""
         face = self.get_current_face()
@@ -396,8 +604,10 @@ class snarlingCreature:
             text_img = text_img.resize(final_size, Image.Resampling.LANCZOS)
 
         # Center position with animation offsets
+        # Shift face up slightly to account for banner area at bottom
+        face_y_offset = -20 if self._is_banner_active() else 0
         x = (WIDTH - text_img.width) // 2 + self.animation_offset_x
-        y = (HEIGHT - text_img.height) // 2 + self.animation_offset_y - 10
+        y = (HEIGHT - text_img.height) // 2 + self.animation_offset_y + face_y_offset - 10
 
         # Paste with alpha blending
         if text_img.mode == 'RGBA':
@@ -407,14 +617,32 @@ class snarlingCreature:
             self.img.paste(text_img, (x, y))
 
     def draw_status(self):
-        """Draw status bar at bottom"""
+        """Draw status banners at bottom within the banner area.
+        Banner backgrounds are drawn by draw_banner_background() called from draw_frame().
+        This method only draws text and other overlay content."""
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        banner_top = HEIGHT - inset - BANNER_HEIGHT + 4  # Small padding from separator
+        banner_bottom = HEIGHT - inset - 4  # Small padding from bottom
+        text_left = inset + 10
+        text_right = WIDTH - inset - 10
+        max_text_width = text_right - text_left
+
         # Mute indicator
         if self.mute:
-            self.draw.text((10, HEIGHT - 25), "🔇", fill=(150, 150, 150))
+            self.draw.text((text_left, banner_bottom - 20), "🔇", fill=(150, 150, 150))
 
-        # State indicator
-        state_text = f"State: {self.state.upper()}"
-        self.draw.text((WIDTH - 120, HEIGHT - 25), state_text, fill=(200, 200, 200))
+        # State indicator (only show when no active banner)
+        if not self._is_banner_active():
+            try:
+                state_font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14
+                )
+            except OSError:
+                state_font = ImageFont.load_default()
+            state_text = f"{self.state.upper()}"
+            bbox = self.draw.textbbox((0, 0), state_text, font=state_font)
+            st_w = bbox[2] - bbox[0]
+            self.draw.text((WIDTH - inset - 10 - st_w, banner_bottom - 18), state_text, fill=(80, 80, 100), font=state_font)
 
         # Notification banners/hints
         if self.state == STATE_NOTIFYING and self._notify_active:
@@ -450,45 +678,26 @@ class snarlingCreature:
                 lines = self._notify_banners[self._notify_banner_index]
                 is_banner1 = (self._notify_banner_index == 0)
 
-                # Dark background tinted by priority
-                bg_colors = {
-                    'high': (80, 30, 20),
-                    'normal': (60, 50, 20),
-                    'low': (50, 50, 30),
-                }
-                bg = bg_colors.get(self._notify_priority, bg_colors['normal'])
-
                 if is_banner1:
-                    # Banner 1: 60px (2 lines), anchored above status bar
-                    banner_height = 60
-                    overlay_top = HEIGHT - 30 - banner_height
-                    overlay_bottom = HEIGHT - 30
-                    self.draw.rectangle((0, overlay_top, WIDTH, overlay_bottom), fill=bg)
-                    # Header line in brighter color, detail in white
-                    # Add stack count indicator (e.g., "1/3") when text is revealed
+                    # Banner 1: header + preview (2 lines)
                     total_notifications = 1 + len(self._notify_stack)
                     if total_notifications > 1:
                         count_indicator = f" ({1}/{total_notifications})"
-                        self.draw.text((10, overlay_top + 4), lines[0] + count_indicator, fill=(255, 200, 200), font=header_font)
+                        self.draw.text((text_left, banner_top), lines[0] + count_indicator, fill=(255, 200, 200), font=header_font)
                     else:
-                        self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 200, 200), font=header_font)
+                        self.draw.text((text_left, banner_top), lines[0], fill=(255, 200, 200), font=header_font)
                     if lines[1]:
-                        self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=msg_font)
+                        self.draw.text((text_left, banner_top + 28), lines[1], fill=(255, 255, 255), font=msg_font)
                 else:
-                    # Banner 2: 80px (3 lines), same top as banner 1, extends down
-                    banner_height = 80
-                    overlay_top = HEIGHT - 30 - 60  # Same top as banner 1
-                    overlay_bottom = overlay_top + banner_height  # = HEIGHT - 10
-                    self.draw.rectangle((0, overlay_top, WIDTH, overlay_bottom), fill=bg)
-                    # All white, word-wrapped message
+                    # Banner 2: word-wrapped message (3 lines)
                     line_height = 22
                     for i in range(min(len(lines), 3)):
-                        y = overlay_top + 4 + (i * line_height)
-                        self.draw.text((10, y), lines[i], fill=(255, 255, 255), font=msg_font)
+                        y = banner_top + (i * line_height)
+                        self.draw.text((text_left, y), lines[i], fill=(255, 255, 255), font=msg_font)
             else:
-                # Show subtle hint at bottom so user knows they can interact
+                # Show subtle hint so user knows they can interact
                 hint_text = "• A: read  B: dismiss"
-                self.draw.text((10, HEIGHT - 55), hint_text, fill=(120, 120, 120), font=hint_font)
+                self.draw.text((text_left, banner_top + 20), hint_text, fill=(120, 120, 140), font=hint_font)
 
         # Approval alternating banners
         elif self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners'):
@@ -509,69 +718,48 @@ class snarlingCreature:
                 header_font = ImageFont.load_default()
                 msg_font = header_font
 
-            # Banner background - height adapts to content
-            # Banner 1: 60px (2 lines), anchored above status bar
-            # Banner 2: 80px (3 lines), extends down over status bar area
             lines = self._approval_banners[self._approval_banner_index]
             is_banner1 = (self._approval_banner_index == 0)
-            if is_banner1:
-                banner_height = 60
-                overlay_top = HEIGHT - 30 - banner_height
-                overlay_bottom = HEIGHT - 30
-            else:
-                banner_height = 80
-                # Banner 2: same top as banner 1, but extends down into status bar area
-                overlay_top = HEIGHT - 30 - 60  # Same top as banner 1
-                overlay_bottom = overlay_top + banner_height  # = HEIGHT - 10
-            self.draw.rectangle((0, overlay_top, WIDTH, overlay_bottom), fill=(60, 20, 20))
 
             if is_banner1:
-                # Banner 1: red top header + white bottom detail
-                self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 200, 200), font=header_font)
+                # Banner 1: header + action (2 lines)
+                self.draw.text((text_left, banner_top), lines[0], fill=(255, 200, 200), font=header_font)
                 if lines[1]:
-                    self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=msg_font)
+                    self.draw.text((text_left, banner_top + 28), lines[1], fill=(255, 255, 255), font=msg_font)
             else:
-                # Banner 2: up to 3 lines, same style (no red/white split)
+                # Banner 2: description (3 lines)
                 line_height = 22
                 for i in range(min(len(lines), 3)):
-                    y = overlay_top + 4 + (i * line_height)
-                    self.draw.text((10, y), lines[i], fill=(255, 255, 255), font=msg_font)
+                    y = banner_top + (i * line_height)
+                    self.draw.text((text_left, y), lines[i], fill=(255, 255, 255), font=msg_font)
 
-        # Status message overlay (non-approval)
+        # Status message overlay (non-approval, non-notification)
         elif self.status_timer > 0:
-            # Semi-transparent background (2x taller, grows upward from original position)
-            overlay_bottom = HEIGHT - 30
-            overlay_top = overlay_bottom - 60
-            overlay_left = 5
-            overlay_right = WIDTH - 20
-            self.draw.rectangle((0, overlay_top, overlay_right, overlay_bottom), fill=(40, 50, 60))
-            # Status text (regular weight, 24pt)
             try:
                 status_font = ImageFont.truetype(
                     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
                 )
             except OSError:
                 status_font = ImageFont.load_default()
-            # Word-wrap text within the box
-            max_width = overlay_right - overlay_left - 5
+            # Word-wrap text within the banner area
             words = self.status_message.split(' ')
             lines = []
             current_line = ''
             for word in words:
                 test_line = f'{current_line} {word}'.strip() if current_line else word
                 bbox = status_font.getbbox(test_line)
-                if bbox[2] - bbox[0] > max_width and current_line:
+                if bbox[2] - bbox[0] > max_text_width and current_line:
                     lines.append(current_line)
                     current_line = word
                 else:
                     current_line = test_line
             if current_line:
                 lines.append(current_line)
-            y = overlay_top + 5
+            y = banner_top
             for line in lines:
-                if y + 24 > overlay_bottom:
+                if y + 24 > banner_bottom:
                     break
-                self.draw.text((overlay_left, y), line, fill=(255, 255, 255), font=status_font)
+                self.draw.text((text_left, y), line, fill=(255, 255, 255), font=status_font)
                 y += 24
 
     def show_status_summary(self):
@@ -1080,7 +1268,7 @@ class snarlingCreature:
                 self.led_timer = 0
 
     def draw_frame(self):
-        """Render the frame"""
+        """Render the frame using the new design system"""
         # Check if screen is asleep (but allow status messages to show)
         if self.screen_asleep:
             # Render black screen when asleep
@@ -1088,47 +1276,62 @@ class snarlingCreature:
             
             # Only show status messages even in sleep mode
             if self.status_timer > 0:
-                # Semi-transparent background (2x taller, grows upward)
-                overlay_bottom = HEIGHT - 30
-                overlay_top = overlay_bottom - 60
-                overlay_left = 5
-                overlay_right = WIDTH - 20
-                self.draw.rectangle((0, overlay_top, overlay_right, overlay_bottom), fill=(40, 50, 60))
+                inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+                banner_top = HEIGHT - inset - BANNER_HEIGHT + 4
+                banner_bottom = HEIGHT - inset - 4
+                text_left = inset + 10
+                text_right = WIDTH - inset - 10
+                max_text_width = text_right - text_left
+                # Show in the banner area
+                self.draw.rectangle(
+                    (inset + 1, banner_top - 4, WIDTH - inset - 1, banner_bottom),
+                    fill=COLOR_BANNER_BG
+                )
                 try:
                     status_font = ImageFont.truetype(
                         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
                     )
                 except OSError:
                     status_font = ImageFont.load_default()
-                # Word-wrap text within the box
-                max_width = overlay_right - overlay_left - 5
                 words = self.status_message.split(' ')
                 lines = []
                 current_line = ''
                 for word in words:
                     test_line = f'{current_line} {word}'.strip() if current_line else word
                     bbox = status_font.getbbox(test_line)
-                    if bbox[2] - bbox[0] > max_width and current_line:
+                    if bbox[2] - bbox[0] > max_text_width and current_line:
                         lines.append(current_line)
                         current_line = word
                     else:
                         current_line = test_line
                 if current_line:
                     lines.append(current_line)
-                y = overlay_top + 5
+                y = banner_top
                 for line in lines:
-                    if y + 24 > overlay_bottom:
+                    if y + 24 > banner_bottom:
                         break
-                    self.draw.text((overlay_left, y), line, fill=(255, 255, 255), font=status_font)
+                    self.draw.text((text_left, y), line, fill=(255, 255, 255), font=status_font)
                     y += 24
             return
         
-        # Normal rendering when awake
-        # Clear background
-        self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=COLOR_BG)
-
-        # Draw elements
+        # Normal rendering when awake — new design system
+        # 1. Background
+        self.draw_background()
+        # 2. Outer border (mood ring)
+        self.draw_outer_border()
+        # 3. Inner frame
+        self.draw_inner_frame()
+        # 4. Button indicators
+        self.draw_button_indicators()
+        # 5. Status boxes
+        self.draw_status_boxes()
+        # 6. Face
         self.draw_face()
+        # 7. Separator + banner background (conditional)
+        if self._is_banner_active():
+            self.draw_separator()
+            self.draw_banner_background()
+        # 8. Banner text
         self.draw_status()
 
     def render(self):
