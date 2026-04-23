@@ -826,6 +826,8 @@ class snarlingCreature:
             # If notifications were queued during approval, show them now
             if self._notify_stack:
                 self._activate_next_notification()
+
+    def reject_request(self):
         """Handle rejection button press (B button in approval state)"""
         if self.state == STATE_AWAITING_APPROVAL:
             print("[snarling] Request REJECTED by user")
