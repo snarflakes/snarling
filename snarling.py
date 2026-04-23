@@ -829,8 +829,9 @@ class snarlingCreature:
             # Return to sleeping state after approval
             self.state = STATE_SLEEPING
             self.led_timer = 0
-
-    def reject_request(self):
+            # If notifications were queued during approval, show them now
+            if self._notify_stack:
+                self._activate_next_notification()
         """Handle rejection button press (B button in approval state)"""
         if self.state == STATE_AWAITING_APPROVAL:
             print("[snarling] Request REJECTED by user")
@@ -843,9 +844,11 @@ class snarlingCreature:
             # Return to sleeping state after rejection
             self.state = STATE_SLEEPING
             self.led_timer = 0
+            # If notifications were queued during approval, show them now
+            if self._notify_stack:
+                self._activate_next_notification()
 
     def forward_approval_response(self, approved):
-        """Forward approval response to the OpenClaw webhook"""
         request_id = getattr(self, '_pending_approval_id', 'unknown')
         session_key = getattr(self, '_pending_session_key', None) or 'agent:main:main'
         print(f"[snarling] Forwarding approval for {request_id}: {'APPROVED' if approved else 'REJECTED'} (sessionKey={session_key})")
@@ -1001,7 +1004,8 @@ class snarlingCreature:
     def set_notification(self, message, priority='normal'):
         """Set state to notifying with message and priority.
         If a notification is already active, queue this one in the stack.
-        The stack is priority-sorted (high > normal > low, LIFO within same priority)."""
+        The stack is priority-sorted (high > normal > low, LIFO within same priority).
+        If an approval is pending, just queue — don't interrupt."""
         # Add to stack with a monotonically increasing sequence number
         self._notify_seq += 1
         item = {"message": message, "priority": priority, "_seq": self._notify_seq}
@@ -1009,6 +1013,11 @@ class snarlingCreature:
         # Stable sort: primary key = priority rank (high=0, normal=1, low=2),
         # secondary key = -_seq so newer items sort first within same priority
         self._notify_stack.sort(key=self._notify_sort_key)
+
+        # Don't interrupt an active approval — notifications will show after it's resolved
+        if self.state == STATE_AWAITING_APPROVAL:
+            print(f"[snarling] Notification queued (approval pending): priority={priority}, stack_size={len(self._notify_stack)}")
+            return
 
         # If already displaying a notification, check for priority bump
         if self._notify_active and self.state == STATE_NOTIFYING:
