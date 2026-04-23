@@ -55,7 +55,7 @@ COLOR_SEPARATOR = (255, 255, 255)  # White separator line
 BORDER_MARGIN = 5             # Outer border margin from screen edges
 BORDER_RADIUS = 18            # Outer border corner radius
 BORDER_WIDTH = 5              # Outer border stroke width
-INNER_FRAME_INSET = 3         # Inner frame inset from outer border
+INNER_FRAME_INSET = 10        # Inner frame inset from outer border
 INNER_FRAME_WIDTH = 1         # Inner frame stroke width
 BUTTON_W = 20                 # Button indicator width
 BUTTON_H = 14                 # Button indicator height
@@ -529,20 +529,14 @@ class snarlingCreature:
         inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
         sep_y = HEIGHT - inset - BANNER_HEIGHT
         self.draw.line(
-            (inset + 4, sep_y, WIDTH - inset - 4, sep_y),
+            (inset + 1, sep_y, WIDTH - inset - 1, sep_y),
             fill=COLOR_SEPARATOR,
             width=1
         )
 
     def draw_banner_background(self):
-        """Draw the slightly differentiated background for the banner area.
-        Only visible when banner is active."""
-        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
-        sep_y = HEIGHT - inset - BANNER_HEIGHT
-        self.draw.rectangle(
-            (inset + 1, sep_y + 1, WIDTH - inset - 1, HEIGHT - inset - 1),
-            fill=COLOR_BANNER_BG
-        )
+        """No filled background below separator — just the line."""
+        pass
 
     def draw_face(self):
         """Draw the face expression in the center of the screen using DejaVuSansMono like pwnagotchi"""
