@@ -1138,8 +1138,11 @@ class snarlingCreature:
             desc_text = message
             print(f"[snarling] No ': ' found, full message as desc: '{message}'")
         # Word-wrap each line to fit within pixel width, breaking at word boundaries
-        # Banner text starts at x=10, display is 320px wide → usable = 310px
-        usable_width = max_text_width
+        # Calculate usable width based on display dimensions and frame insets
+        inner_inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        text_left = inner_inset + 10
+        text_right_calc = WIDTH - inner_inset - 30
+        usable_width = text_right_calc - text_left
         def word_wrap(text, font, max_width):
             """Word-wrap text to fit within max_width pixels using the given font."""
             words = text.split()
