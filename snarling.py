@@ -99,7 +99,7 @@ class FaceExpressions:
     # Normal: informative, curious, aware
     NOTIFY_NORMAL = ['(•_•)', '(◡_◡)', '(⊙_⊙)', '(◉_◉)']
     # Low: gentle, slight perk, relaxed
-    NOTIFY_LOW = ['(´・ω・)', '(・_・)', '(︶ω︶)', '(◠‿◠)']
+    NOTIFY_LOW = ['(◠‿◠)']
 
     @classmethod
     def get_faces_for_state(cls, state, priority=None):
