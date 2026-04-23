@@ -358,9 +358,12 @@ class snarlingCreature:
                 self.animation_offset_x = 0
 
     def _is_banner_active(self):
-        """Check if a banner (notification, approval, or status message) is currently active."""
+        """Check if a banner (notification, approval, or status message) is currently active and visible.
+        For notifications, the banner only counts as active when the user has pressed A to reveal text.
+        Before reveal, only a subtle hint is shown — no banner background or face shift."""
+        if self.state == STATE_NOTIFYING and self._notify_active:
+            return self._notify_text_revealed
         return (
-            (self.state == STATE_NOTIFYING and self._notify_active) or
             (self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners')) or
             self.status_timer > 0
         )
