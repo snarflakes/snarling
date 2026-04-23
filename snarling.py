@@ -551,7 +551,7 @@ class snarlingCreature:
 
         # Cache font lookup on first call - use DejaVuSansMono like pwnagotchi
         if not hasattr(self, '_cached_font'):
-            self._cached_font_size = 48
+            self._cached_font_size = 62
             
             try:
                 # Use DejaVuSansMono-Bold like pwnagotchi
