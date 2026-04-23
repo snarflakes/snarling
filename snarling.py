@@ -627,7 +627,7 @@ class snarlingCreature:
         banner_top = HEIGHT - inset - BANNER_HEIGHT + 4  # Small padding from separator
         banner_bottom = HEIGHT - inset - 4  # Small padding from bottom
         text_left = inset + 10
-        text_right = WIDTH - inset - 10
+        text_right = WIDTH - inset - 30
         max_text_width = text_right - text_left
 
         # Mute indicator
@@ -979,12 +979,12 @@ class snarlingCreature:
         if len(message) > 25 and ' ' in preview_text:
             preview_text = preview_text.rsplit(' ', 1)[0]
         # Word-wrap preview with header font
-        preview_lines = word_wrap(preview_text, banner_header_font, max_width=300)
+        preview_lines = word_wrap(preview_text, banner_header_font, max_width=280)
         preview_line = preview_lines[0] if preview_lines else ""
         banner1 = [header, preview_line]
 
         # Banner 2: Full message word-wrapped to max 3 lines
-        msg_lines = word_wrap(message, banner_msg_font, max_width=310)
+        msg_lines = word_wrap(message, banner_msg_font, max_width=280)
         # Cap at 3 lines, truncating last line with "..." if needed
         if len(msg_lines) > 3:
             msg_lines = msg_lines[:3]
@@ -1139,7 +1139,7 @@ class snarlingCreature:
             print(f"[snarling] No ': ' found, full message as desc: '{message}'")
         # Word-wrap each line to fit within pixel width, breaking at word boundaries
         # Banner text starts at x=10, display is 320px wide → usable = 310px
-        usable_width = 310
+        usable_width = max_text_width
         def word_wrap(text, font, max_width):
             """Word-wrap text to fit within max_width pixels using the given font."""
             words = text.split()
@@ -1285,7 +1285,7 @@ class snarlingCreature:
                 banner_top = HEIGHT - inset - BANNER_HEIGHT + 4
                 banner_bottom = HEIGHT - inset - 4
                 text_left = inset + 10
-                text_right = WIDTH - inset - 10
+                text_right = WIDTH - inset - 30
                 max_text_width = text_right - text_left
                 # Show in the banner area
                 self.draw.rectangle(
