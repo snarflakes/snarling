@@ -95,7 +95,7 @@ class FaceExpressions:
 
     # Notification faces - priority-based
     # High: urgent, demanding attention
-    NOTIFY_HIGH = ['(☉_☉)', '(ಠ_ಠ)', '(⌐■_■)', '(⚠_⚠)']
+    NOTIFY_HIGH = ['(☉_☉)', '(ಠ_ಠ)', '(⚠_⚠)']
     # Normal: informative, curious, aware
     NOTIFY_NORMAL = ['(•_•)', '(◡_◡)', '(⊙_⊙)', '(◉_◉)']
     # Low: gentle, slight perk, relaxed
@@ -486,7 +486,7 @@ class snarlingCreature:
         inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
         total_width = 5 * STATUS_BOX_SIZE + 4 * STATUS_BOX_GAP
         start_x = (WIDTH - total_width) // 2
-        y = inset + BUTTON_MARGIN + BUTTON_H + 6  # Below button indicators
+        y = inset + 4  # Touching the white inner frame
 
         # Determine fill level and color
         if self.state == STATE_SLEEPING:
@@ -645,7 +645,9 @@ class snarlingCreature:
             state_text = f"{self.state.upper()}"
             bbox = self.draw.textbbox((0, 0), state_text, font=state_font)
             st_w = bbox[2] - bbox[0]
-            self.draw.text((WIDTH - inset - 10 - st_w, banner_bottom - 18), state_text, fill=(80, 80, 100), font=state_font)
+            # Center the state text horizontally
+            st_x = (WIDTH - st_w) // 2
+            self.draw.text((st_x, banner_bottom - 18), state_text, fill=(80, 80, 100), font=state_font)
 
         # Notification banners/hints
         if self.state == STATE_NOTIFYING and self._notify_active:
