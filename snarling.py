@@ -168,7 +168,7 @@ class snarlingCreature:
         self._notify_callback_url = None  # where to POST feedback
         self._notify_session_key = None   # session routing
         self._notify_secret = None        # auth secret (same APPROVAL_SECRET)
-        self._notify_duration = 0         # auto-dismiss timeout in seconds (0 = use default 300s)
+        self._notify_duration = 0         # auto-dismiss timeout in seconds (0 = use priority-based default: low=300s, others=no timeout)
 
         # Notification stack (priority-sorted pending queue)
         self._notify_stack = []  # list of {"message": str, "priority": str, "_seq": int, "notification_id": str|None, "callback_url": str|None, "session_key": str|None, "secret": str|None, "duration": int}
@@ -1389,11 +1389,13 @@ class snarlingCreature:
 
         # Check notification timeout (only low-priority notifications auto-dismiss)
         # High and normal priority stay until the user interacts
+        # duration=0 means "use priority-based default" (low=300s, others=no timeout)
+        effective_duration = self._notify_duration if self._notify_duration > 0 else (300 if self._notify_priority == 'low' else 0)
         if self._notify_active and self.state == STATE_NOTIFYING and self._notify_start_time > 0:
-            if self._notify_priority == 'low' and self._notify_duration > 0:
+            if self._notify_priority == 'low' and effective_duration > 0:
                 elapsed_notify = time.time() - self._notify_start_time
-                if elapsed_notify >= self._notify_duration:
-                    print(f"[snarling] Low-priority notification timed out after {self._notify_duration}s")
+                if elapsed_notify >= effective_duration:
+                    print(f"[snarling] Low-priority notification timed out after {effective_duration}s")
                     self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True)
                     self._dismiss_notification()
 
