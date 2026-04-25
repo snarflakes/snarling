@@ -1331,14 +1331,34 @@ class snarlingCreature:
         while len(action_lines) < 1:
             action_lines.append("")
         banner1 = [header, action_lines[0]]
-        # Banner 2: description word-wrapped across two lines
+        # Banner 2: first 3 lines of description word-wrapped
         desc_lines = word_wrap(desc_text, wrap_msg_font, max_width=usable_width)
-        while len(desc_lines) < 3:
-            desc_lines.append("")
-        banner2 = desc_lines[:3]
+        banner2_lines = desc_lines[:3]
+        if len(desc_lines) > 3:
+            banner2_lines = desc_lines[:3]
+            banner2_lines[2] = banner2_lines[2][:30] + "..."
+        while len(banner2_lines) < 3:
+            banner2_lines.append("")
+        banner2 = banner2_lines
+
+        # Banner 3: continuation — lines 4+ of description
+        remaining_lines = desc_lines[3:] if len(desc_lines) > 3 else []
+        if remaining_lines:
+            banner3_lines = remaining_lines[:3]
+            if len(remaining_lines) > 3:
+                banner3_lines = remaining_lines[:3]
+                banner3_lines[2] = banner3_lines[2][:30] + "..."
+            while len(banner3_lines) < 3:
+                banner3_lines.append("")
+            banner3 = banner3_lines
+        else:
+            banner3 = None
+
         print(f"[snarling] Banner1: {banner1}")
         print(f"[snarling] Banner2: {banner2}")
-        self._approval_banners = [banner1, banner2]
+        if banner3:
+            print(f"[snarling] Banner3: {banner3}")
+        self._approval_banners = [b for b in [banner1, banner2, banner3] if b is not None]
         self._approval_banner_index = 0
         self._approval_banner_timer = 0
         self._approval_banner_interval = 45  # frames per banner (~1.5s at 30fps)
