@@ -1098,7 +1098,7 @@ class snarlingCreature:
             "message": message, "priority": priority, "_seq": self._notify_seq,
             "notification_id": notification_id, "callback_url": callback_url,
             "session_key": session_key, "secret": secret,
-            "duration": duration if duration is not None else 300
+            "duration": duration if duration is not None else (300 if priority == 'low' else 0)
         }
         self._notify_stack.append(item)
         # Stable sort: primary key = priority rank (high=0, normal=1, low=2),
@@ -1161,7 +1161,7 @@ class snarlingCreature:
         self._notify_callback_url = item.get('callback_url')
         self._notify_session_key = item.get('session_key')
         self._notify_secret = item.get('secret')
-        self._notify_duration = item.get('duration', 300) or 300
+        self._notify_duration = item.get('duration', 300) or 0  # 0 = no timeout (stays until dismissed)
 
         # Prepare banners
         self._prepare_notify_banners(message, priority)
@@ -1198,7 +1198,7 @@ class snarlingCreature:
             self._notify_callback_url = item.get('callback_url')
             self._notify_session_key = item.get('session_key')
             self._notify_secret = item.get('secret')
-            self._notify_duration = item.get('duration', 300) or 300
+            self._notify_duration = item.get('duration', 300) or 0  # 0 = no timeout
             # Prepare banners for the new notification
             self._prepare_notify_banners(message, priority)
             # Reset face animation for new priority
@@ -1387,13 +1387,15 @@ class snarlingCreature:
         # Update LED
         self.update_led()
 
-        # Check notification timeout
+        # Check notification timeout (only low-priority notifications auto-dismiss)
+        # High and normal priority stay until the user interacts
         if self._notify_active and self.state == STATE_NOTIFYING and self._notify_start_time > 0:
-            elapsed_notify = time.time() - self._notify_start_time
-            if elapsed_notify >= self._notify_duration:
-                print(f"[snarling] Notification timed out after {self._notify_duration}s")
-                self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True)
-                self._dismiss_notification()
+            if self._notify_priority == 'low' and self._notify_duration > 0:
+                elapsed_notify = time.time() - self._notify_start_time
+                if elapsed_notify >= self._notify_duration:
+                    print(f"[snarling] Low-priority notification timed out after {self._notify_duration}s")
+                    self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True)
+                    self._dismiss_notification()
 
         # Decrement status timer every frame (even when screen is asleep)
         if self.status_timer > 0:
