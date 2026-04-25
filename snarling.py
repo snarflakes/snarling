@@ -1100,6 +1100,7 @@ class snarlingCreature:
             "session_key": session_key, "secret": secret,
             "duration": duration if duration is not None else (300 if priority == 'low' else 0)
         }
+        print(f"[snarling] set_notification: priority={priority}, duration_in={duration}, item_duration={item['duration']}")
         self._notify_stack.append(item)
         # Stable sort: primary key = priority rank (high=0, normal=1, low=2),
         # secondary key = -_seq so newer items sort first within same priority
