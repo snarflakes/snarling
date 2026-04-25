@@ -1353,9 +1353,7 @@ class snarlingCreature:
                             self.forward_notification_feedback(revealed=True, time_to_reveal_sec=elapsed, dismissed=False)
                             print(f"[snarling] Notification text revealed: {self._notify_message[:50]} (took {elapsed:.1f}s)")
                         else:
-                            # Dismiss notification after text was revealed
-                            time_to_reveal = time.time() - self._notify_start_time
-                            self.forward_notification_feedback(revealed=True, time_to_reveal_sec=time_to_reveal, dismissed=True)
+                            # Dismiss notification after text was revealed (feedback already sent on reveal)
                             self._dismiss_notification()
                     elif name == 'B':
                         # Dismiss without revealing (snooze/dismiss)
