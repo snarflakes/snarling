@@ -164,9 +164,14 @@ class snarlingCreature:
         self._notify_text_revealed = False
         self._notify_pre_state = STATE_SLEEPING  # state to return to after notification
         self._notify_showing_notify_face = False  # True when current face is a notification face
+        self._notify_id = None           # notification_id from plugin
+        self._notify_callback_url = None  # where to POST feedback
+        self._notify_session_key = None   # session routing
+        self._notify_secret = None        # auth secret (same APPROVAL_SECRET)
+        self._notify_duration = 0         # auto-dismiss timeout in seconds (0 = use default 300s)
 
         # Notification stack (priority-sorted pending queue)
-        self._notify_stack = []  # list of {"message": str, "priority": str, "_seq": int}
+        self._notify_stack = []  # list of {"message": str, "priority": str, "_seq": int, "notification_id": str|None, "callback_url": str|None, "session_key": str|None, "secret": str|None, "duration": int}
         self._notify_seq = 0  # monotonically increasing insertion counter for LIFO within same priority
 
         # Banner cycling (may already exist via set_notification, but init here too)
@@ -922,6 +927,91 @@ class snarlingCreature:
         except Exception as e:
             print(f"[snarling] Webhook call failed: {e}")
 
+    def forward_notification_feedback(self, revealed, time_to_reveal_sec, dismissed, timed_out=False):
+        """Send notification interaction feedback back to the gateway.
+        Mirrors forward_approval_response exactly: same gateway token, same auth, same WebSocket wake."""
+        notify_id = self._notify_id
+        callback_url = self._notify_callback_url
+        session_key = self._notify_session_key or 'agent:main:main'
+        secret = self._notify_secret
+
+        if not notify_id or not callback_url:
+            print(f"[snarling] No callback for notification (id={notify_id}, url={callback_url}) — skipping feedback")
+            return
+
+        print(f"[snarling] Forwarding notification feedback for {notify_id}: revealed={revealed}, time_to_reveal={time_to_reveal_sec:.1f}s, dismissed={dismissed}, timed_out={timed_out} (sessionKey={session_key})")
+        try:
+            import requests as req_lib
+            gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+            response_data = {
+                "notification_id": notify_id,
+                "revealed": revealed,
+                "time_to_reveal_sec": time_to_reveal_sec,
+                "dismissed": dismissed,
+                "timed_out": timed_out,
+                "secret": secret,
+                "sessionKey": session_key
+            }
+            response = req_lib.post(
+                callback_url,
+                json=response_data,
+                headers={"Authorization": f"Bearer {gateway_token}"},
+                timeout=5
+            )
+            print(f"[snarling] Notification callback status: {response.status_code}")
+            if response.status_code == 200:
+                print(f"[snarling] Gateway acknowledged: {response.json().get('message', 'OK')}")
+
+            # Wake approach: After the callback, use the OpenClaw WebSocket RPC
+            # API to trigger a heartbeat — same pattern as forward_approval_response.
+            try:
+                import threading
+                import json as json_mod
+
+                def delayed_wake():
+                    import time
+                    time.sleep(2)  # Wait for callback handler + session lane to fully unwind
+                    try:
+                        import websocket
+                        ws = websocket.create_connection(
+                            'ws://127.0.0.1:18789/ws',
+                            timeout=10,
+                            header=['Authorization: Bearer ' + gateway_token]
+                        )
+                        # Handle challenge-response handshake
+                        challenge_raw = ws.recv()
+                        challenge_data = json_mod.loads(challenge_raw)
+                        if challenge_data.get('event') == 'connect.challenge':
+                            nonce = challenge_data['payload']['nonce']
+                            ws.send(json_mod.dumps({'type': 'response', 'payload': {'nonce': nonce}}))
+                            print(f'[snarling] WebSocket challenge completed (notification feedback)')
+                        else:
+                            print(f'[snarling] Unexpected first message: {str(challenge_raw)[:100]}')
+
+                        # Trigger immediate heartbeat via RPC
+                        hb_msg = json_mod.dumps({
+                            'type': 'rpc',
+                            'method': 'system.runHeartbeatOnce',
+                            'params': {
+                                'sessionKey': session_key,
+                                'reason': 'hook:notification',
+                                'heartbeat': {'target': 'last'}
+                            }
+                        })
+                        ws.send(hb_msg)
+                        hb_result = ws.recv()
+                        print(f'[snarling] Heartbeat trigger result (notification): {str(hb_result)[:200]}')
+                        ws.close()
+                    except Exception as e:
+                        print(f'[snarling] WebSocket wake failed (notification): {e}')
+
+                wake_thread = threading.Thread(target=delayed_wake, daemon=True)
+                wake_thread.start()
+            except Exception as wake_err:
+                print(f'[snarling] Delayed wake setup failed (notification): {wake_err}')
+        except Exception as e:
+            print(f"[snarling] Notification callback failed: {e}")
+
     def _notify_sort_key(self, item):
         """Sort key for notification stack: high first, then normal, then low.
         Within same priority, higher _seq (newer) comes first (LIFO)."""
@@ -997,14 +1087,19 @@ class snarlingCreature:
         self._notify_banner_timer = 0
         self._notify_banner_interval = 45  # ~1.5s at 30fps
 
-    def set_notification(self, message, priority='normal'):
+    def set_notification(self, message, priority='normal', notification_id=None, callback_url=None, session_key=None, secret=None, duration=None):
         """Set state to notifying with message and priority.
         If a notification is already active, queue this one in the stack.
         The stack is priority-sorted (high > normal > low, LIFO within same priority).
         If an approval is pending, just queue — don't interrupt."""
         # Add to stack with a monotonically increasing sequence number
         self._notify_seq += 1
-        item = {"message": message, "priority": priority, "_seq": self._notify_seq}
+        item = {
+            "message": message, "priority": priority, "_seq": self._notify_seq,
+            "notification_id": notification_id, "callback_url": callback_url,
+            "session_key": session_key, "secret": secret,
+            "duration": duration if duration is not None else 300
+        }
         self._notify_stack.append(item)
         # Stable sort: primary key = priority rank (high=0, normal=1, low=2),
         # secondary key = -_seq so newer items sort first within same priority
@@ -1024,7 +1119,12 @@ class snarlingCreature:
             if not self._notify_text_revealed and new_rank < current_rank:
                 # Bump current notification back to stack
                 self._notify_seq += 1
-                bumped = {"message": self._notify_message, "priority": self._notify_priority, "_seq": self._notify_seq}
+                bumped = {
+                    "message": self._notify_message, "priority": self._notify_priority, "_seq": self._notify_seq,
+                    "notification_id": self._notify_id, "callback_url": self._notify_callback_url,
+                    "session_key": self._notify_session_key, "secret": self._notify_secret,
+                    "duration": self._notify_duration
+                }
                 self._notify_stack.append(bumped)
                 self._notify_stack.sort(key=self._notify_sort_key)
                 print(f"[snarling] Priority bump: '{priority}' replaces '{self._notify_priority}' on screen (text not revealed)")
@@ -1056,6 +1156,12 @@ class snarlingCreature:
         self._notify_message = message
         self._notify_start_time = time.time()
         self._notify_text_revealed = False
+        # Store feedback metadata from stack item
+        self._notify_id = item.get('notification_id')
+        self._notify_callback_url = item.get('callback_url')
+        self._notify_session_key = item.get('session_key')
+        self._notify_secret = item.get('secret')
+        self._notify_duration = item.get('duration', 300) or 300
 
         # Prepare banners
         self._prepare_notify_banners(message, priority)
@@ -1070,7 +1176,7 @@ class snarlingCreature:
         # LED on until dismissed
         self.led_timer = 216000  # effectively indefinite
         total = 1 + len(self._notify_stack)
-        print(f"[snarling] Notification set: priority={priority}, message='{message[:50]}' ({1}/{total} in stack)")
+        print(f"[snarling] Notification set: priority={priority}, message='{message[:50]}' ({1}/{total} in stack), notify_id={self._notify_id}")
 
     def _dismiss_notification(self):
         """Dismiss the current notification. If stack has items, show next; otherwise restore state."""
@@ -1087,6 +1193,12 @@ class snarlingCreature:
             self._notify_message = message
             self._notify_start_time = time.time()
             self._notify_text_revealed = False
+            # Store feedback metadata from stack item
+            self._notify_id = item.get('notification_id')
+            self._notify_callback_url = item.get('callback_url')
+            self._notify_session_key = item.get('session_key')
+            self._notify_secret = item.get('secret')
+            self._notify_duration = item.get('duration', 300) or 300
             # Prepare banners for the new notification
             self._prepare_notify_banners(message, priority)
             # Reset face animation for new priority
@@ -1106,6 +1218,12 @@ class snarlingCreature:
         self._notify_text_revealed = False
         self._notify_start_time = 0
         self._notify_pre_state = STATE_SLEEPING
+        # Clean up notification feedback metadata
+        self._notify_id = None
+        self._notify_callback_url = None
+        self._notify_session_key = None
+        self._notify_secret = None
+        self._notify_duration = 0
         # Clean up banner attributes
         self._notify_banners = []
         self._notify_banner_index = 0
@@ -1231,12 +1349,17 @@ class snarlingCreature:
                         if not self._notify_text_revealed:
                             # Reveal notification text
                             self._notify_text_revealed = True
-                            print(f"[snarling] Notification text revealed: {self._notify_message[:50]}")
+                            elapsed = time.time() - self._notify_start_time
+                            self.forward_notification_feedback(revealed=True, time_to_reveal_sec=elapsed, dismissed=False)
+                            print(f"[snarling] Notification text revealed: {self._notify_message[:50]} (took {elapsed:.1f}s)")
                         else:
-                            # Dismiss notification early
+                            # Dismiss notification after text was revealed
+                            time_to_reveal = time.time() - self._notify_start_time
+                            self.forward_notification_feedback(revealed=True, time_to_reveal_sec=time_to_reveal, dismissed=True)
                             self._dismiss_notification()
                     elif name == 'B':
                         # Dismiss without revealing (snooze/dismiss)
+                        self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=True)
                         self._dismiss_notification()
                 else:
                     # Normal button handling
@@ -1265,6 +1388,14 @@ class snarlingCreature:
 
         # Update LED
         self.update_led()
+
+        # Check notification timeout
+        if self._notify_active and self.state == STATE_NOTIFYING and self._notify_start_time > 0:
+            elapsed_notify = time.time() - self._notify_start_time
+            if elapsed_notify >= self._notify_duration:
+                print(f"[snarling] Notification timed out after {self._notify_duration}s")
+                self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True)
+                self._dismiss_notification()
 
         # Decrement status timer every frame (even when screen is asleep)
         if self.status_timer > 0:
@@ -1440,9 +1571,14 @@ if FLASK_AVAILABLE and approval_app:
             secret = data.get('secret')
             if not secret:
                 return jsonify({"error": "Missing secret"}), 401
+            # Extract new feedback fields
+            notification_id = data.get('notification_id')
+            callback_url = data.get('callback_url')
+            session_key = data.get('sessionKey')
+            duration = data.get('duration', 300)
             if creature_instance:
-                creature_instance.set_notification(message, priority=priority)
-                print(f"[snarling] Received notification: priority={priority}")
+                creature_instance.set_notification(message, priority=priority, notification_id=notification_id, callback_url=callback_url, session_key=session_key, secret=secret, duration=duration)
+                print(f"[snarling] Received notification: priority={priority}, notify_id={notification_id}")
                 return jsonify({"status": "notification_displayed"})
             else:
                 return jsonify({"error": "snarling not initialized"}), 503
@@ -1474,9 +1610,14 @@ if FLASK_AVAILABLE and approval_app:
             "current_priority": creature_instance._notify_priority,
             "current_message": creature_instance._notify_message[:80] if creature_instance._notify_message else "",
             "text_revealed": creature_instance._notify_text_revealed,
+            "notification_id": creature_instance._notify_id,
+            "callback_url": creature_instance._notify_callback_url,
+            "duration": creature_instance._notify_duration,
+            "start_time": creature_instance._notify_start_time,
             "stack_size": len(creature_instance._notify_stack),
             "stack": [
-                {"priority": item["priority"], "message": item["message"][:50], "seq": item.get("_seq", 0)}
+                {"priority": item["priority"], "message": item["message"][:50], "seq": item.get("_seq", 0),
+                 "notification_id": item.get("notification_id"), "callback_url": item.get("callback_url")}
                 for item in creature_instance._notify_stack
             ]
         })
