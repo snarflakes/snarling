@@ -1022,7 +1022,7 @@ class snarlingCreature:
         return (rank, -item.get('_seq', 0))
 
     def _prepare_notify_banners(self, message, priority):
-        """Build the two alternating banners for a notification and set them on self."""
+        """Build the alternating banners for a notification and set them on self."""
         try:
             banner_header_font = ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
@@ -1075,17 +1075,33 @@ class snarlingCreature:
         preview_line = preview_lines[0] if preview_lines else ""
         banner1 = [header, preview_line]
 
-        # Banner 2: Full message word-wrapped to max 3 lines
+        # Banner 2: First 3 lines of the full message
         msg_lines = word_wrap(message, banner_msg_font, max_width=280)
-        # Cap at 3 lines, truncating last line with "..." if needed
+        banner2_lines = msg_lines[:3]
+        # If there's more, truncate last line with "..."
         if len(msg_lines) > 3:
-            msg_lines = msg_lines[:3]
-            msg_lines[2] = msg_lines[2][:30] + "..."
-        while len(msg_lines) < 3:
-            msg_lines.append("")
-        banner2 = msg_lines
+            banner2_lines = msg_lines[:3]
+            banner2_lines[2] = banner2_lines[2][:30] + "..."
+        while len(banner2_lines) < 3:
+            banner2_lines.append("")
+        banner2 = banner2_lines
 
-        self._notify_banners = [banner1, banner2]
+        # Banner 3: Continuation — lines 4+ of the full message
+        remaining_lines = msg_lines[3:] if len(msg_lines) > 3 else []
+        if remaining_lines:
+            banner3_lines = remaining_lines[:3]
+            # If still more, truncate last line with "..."
+            if len(remaining_lines) > 3:
+                banner3_lines = remaining_lines[:3]
+                banner3_lines[2] = banner3_lines[2][:30] + "..."
+            while len(banner3_lines) < 3:
+                banner3_lines.append("")
+            banner3 = banner3_lines
+        else:
+            # No continuation needed — skip banner 3 (empty)
+            banner3 = None
+
+        self._notify_banners = [b for b in [banner1, banner2, banner3] if b is not None]
         self._notify_banner_index = 0
         self._notify_banner_timer = 0
         self._notify_banner_interval = 45  # ~1.5s at 30fps
