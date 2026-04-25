@@ -942,7 +942,7 @@ class snarlingCreature:
             print(f"[snarling] No callback for notification (id={notify_id}, url={callback_url}) — skipping feedback")
             return
 
-        print(f"[snarling] Forwarding notification feedback for {notify_id}: revealed={revealed}, time_to_reveal={time_to_reveal_sec:.1f}s, queue={time_in_queue_sec:.1f}s, total={time_to_reveal_sec + time_in_queue_sec:.1f}s, dismissed={dismissed}, timed_out={timed_out} (sessionKey={session_key})")
+        print(f"[snarling] Forwarding notification feedback for {notify_id}: revealed={revealed}, time_to_reveal={time_to_reveal_sec + time_in_queue_sec:.1f}s (display={time_to_reveal_sec:.1f}s + queue={time_in_queue_sec:.1f}s), dismissed={dismissed}, timed_out={timed_out} (sessionKey={session_key})")
         try:
             import requests as req_lib
             gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
@@ -950,8 +950,6 @@ class snarlingCreature:
                 "notification_id": notify_id,
                 "revealed": revealed,
                 "time_to_reveal_sec": time_to_reveal_sec + time_in_queue_sec,  # total time from send to reveal
-                "time_to_reveal_display_sec": time_to_reveal_sec,  # display time only
-                "time_in_queue_sec": time_in_queue_sec,
                 "dismissed": dismissed,
                 "timed_out": timed_out,
                 "secret": secret,
