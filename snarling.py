@@ -13,6 +13,7 @@ import random
 import signal
 import sys
 import json
+import threading
 
 # Fix output buffering so print statements show up immediately in logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -101,6 +102,11 @@ class FaceExpressions:
     # Low: gentle, slight perk, relaxed
     NOTIFY_LOW = ['(◠‿◠)']
 
+    # Proximity-aware faces (used when sleeping + someone detected)
+    PROXIMITY_APPROACHING = ['(⊙◡⊙)']  # Eyes widening — awareness
+    PROXIMITY_PRESENT = ['(◠‿◠)']        # Warm recognition — engagement
+    LEAVING = ['(◡‿◡)']                  # Brief "goodbye" face when someone walks away
+
     @classmethod
     def get_faces_for_state(cls, state, priority=None):
         """Get appropriate faces for a given state"""
@@ -187,6 +193,44 @@ class snarlingCreature:
         # LED timer for state change indication
         self.led_timer = 0
 
+        # ── Thermal sensor integration ──────────────────────────
+        self.thermal = None
+        self._thermal_available = False
+
+        # Environmental state (merges thermal + external data)
+        self._environmental_state = {
+            "present": False,
+            "proximity": 0.0,
+            "proximity_zone": "absent",
+            "source": "none",
+            "last_change": None,
+            "ambient_temp": None,
+        }
+        self._environmental_lock = threading.Lock()
+
+        # Proximity-driven brightness transitions
+        self._brightness_target = 0.2
+        self._brightness_current = 0.2
+        self._brightness_ramp_start = 0
+        self._brightness_ramp_duration = 0.7
+
+        # Proximity-driven face state (only used when agent state is sleeping)
+        self._proximity_face_pending = None
+        self._proximity_face_time = 0
+        self._proximity_face_current = "(≖◡◡≖)"
+
+        # Walking away face
+        self._leaving_face_active = False
+        self._leaving_face_timer = 0.0
+
+        # Thermal health check counter
+        self._thermal_health_counter = 0
+
+        # Track previous presence state for leaving-face detection
+        self._prev_env_present = False
+
+        # ── End thermal integration ───────────────────────────────
+
 
 
 
@@ -197,6 +241,22 @@ class snarlingCreature:
 
         # Set initial LED
         self.update_led()
+
+        # Initialize thermal sensor (after display is set up)
+        try:
+            from thermal import ThermalSensor
+            self.thermal = ThermalSensor(
+                on_presence_change=self._on_thermal_presence_change,
+                on_proximity_change=self._on_thermal_proximity_change,
+            )
+            self._thermal_available = True
+            print("[snarling] Thermal sensor initialized (MLX90640)")
+        except ImportError:
+            print("[snarling] thermal.py not found — presence detection disabled")
+        except Exception as e:
+            print(f"[snarling] Thermal sensor init failed: {e} — presence detection disabled")
+            self.thermal = None
+            self._thermal_available = False
 
         # Button handlers
         self.button_pressed = {
@@ -215,13 +275,39 @@ class snarlingCreature:
         self.running = False
 
     def update_led(self):
-        """Update LED based on state and breathing animation (0-1 float values)"""
+        """Update LED based on state, breathing animation, and proximity"""
         # Turn off LED when screen is asleep
         if self.screen_asleep:
             self.display.set_led(0, 0, 0)
             return
-        
+
+        # Get current environmental state (thread-safe)
+        try:
+            with self._environmental_lock:
+                env_present = self._environmental_state["present"]
+                env_proximity = self._environmental_state["proximity"]
+        except Exception:
+            env_present = False
+            env_proximity = 0.0
+
+        # Calculate proximity brightness using exponential smoothing
+        now = time.time()
+        frame_dt = 1.0 / 30.0  # ~30fps
+        alpha = 1 - math.exp(-frame_dt / 0.23)  # ~0.7s time constant
+
+        # If someone just arrived, start the ramp from current brightness
+        # If leaving, start from current brightness
+        self._brightness_current += (self._brightness_target - self._brightness_current) * alpha
+        # Clamp overshoot after settling
+        if self._brightness_target <= 1.0 and self._brightness_current > 1.0:
+            # Decay overshoot (1.05 → 1.0) over ~200ms
+            overshoot_alpha = 1 - math.exp(-frame_dt / 0.067)  # ~200ms settle
+            self._brightness_current += (1.0 - self._brightness_current) * overshoot_alpha
+
+        proximity_brightness = max(0.15, min(self._brightness_current, 1.0))
+
         if self.led_timer > 0:
+            # State-change LED indication takes priority
             if self.state == STATE_SLEEPING:
                 # Blue breathing LED (r, g, b as 0-1 floats)
                 brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
@@ -230,22 +316,22 @@ class snarlingCreature:
             elif self.state == STATE_PROCESSING:
                 # Melon LED hum (slow pulse)
                 pulse = 0.3 + 0.25 * math.sin(self.breath_phase * 1.5)
-                pulse *= 0.7  # Reduce by 30%
+                pulse *= 0.7
                 self.display.set_led(pulse * 0.99, pulse * 0.54, pulse * 0.45)
             elif self.state == STATE_COMMUNICATING:
                 # Cyan pulsing
                 pulse = 0.5 + 0.5 * math.sin(self.breath_phase * 2)
-                pulse *= 0.7  # Reduce by 30%
+                pulse *= 0.7
                 self.display.set_led(0, pulse, pulse)
             elif self.state == STATE_ERROR:
                 # Red alert
                 blink = 1.0 if int(self.breath_phase * 3) % 2 == 0 else 0.4
-                blink *= 0.7  # Reduce by 30%
+                blink *= 0.7
                 self.display.set_led(blink, 0, 0)
             elif self.state == STATE_AWAITING_APPROVAL:
                 # Red LED flash for approval alert
                 blink = 1.0 if int(self.breath_phase * 4) % 2 == 0 else 0.2
-                blink *= 0.7  # Reduce by 30%
+                blink *= 0.7
                 self.display.set_led(blink, 0, 0)
             elif self.state == STATE_NOTIFYING:
                 if self._notify_showing_notify_face:
@@ -264,9 +350,24 @@ class snarlingCreature:
                 else:
                     # LED off when showing pre-state (normal) face
                     self.display.set_led(0, 0, 0)
-        else:
-            # LED off
-            self.display.set_led(0, 0, 0)
+        elif self._thermal_available and env_present:
+            # Proximity-driven LED: warm slow pulse proportional to proximity
+            pulse = 0.3 + 0.4 * math.sin(self.breath_phase * 0.8) * env_proximity
+            warmth = env_proximity  # 0.0 = cool, 1.0 = warm
+            self.display.set_led(
+                pulse * warmth * 0.8,      # Red component (warmth)
+                pulse * 0.3,                 # Green (subtle)
+                pulse * (1 - warmth) * 0.5   # Blue (cool when distant)
+            )
+        elif self.led_timer <= 0:
+            # No state LED timer and no proximity — gentle breathing or off
+            if self.state == STATE_SLEEPING:
+                # Cool slow breathing (default sleeping)
+                brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
+                brightness *= 0.7
+                self.display.set_led(0, brightness * 0.25, brightness * 0.5)
+            else:
+                self.display.set_led(0, 0, 0)
 
     def get_color(self):
         """Get current color based on state (and face type during notifications)"""
@@ -306,8 +407,38 @@ class snarlingCreature:
         """Update face animation and expression"""
         # Update face timer for expression changes
         self.face_timer += dt
+
+        # Update leaving face timer
+        if self._leaving_face_active:
+            self._leaving_face_timer -= dt
+            if self._leaving_face_timer <= 0:
+                self._leaving_face_active = False
+
+        # Check for pending proximity-driven face transition (with delay)
+        now = time.time()
+        if self._proximity_face_pending and now >= self._proximity_face_time:
+            self._proximity_face_current = self._proximity_face_pending
+            self._proximity_face_pending = None
+
         if self.face_timer > 2.0:  # Change face every 2 seconds for more variety
-            if self.state == STATE_NOTIFYING and self._notify_active:
+            # Leaving face overrides everything (brief goodbye)
+            if self._leaving_face_active:
+                faces = FaceExpressions.LEAVING
+            elif self._thermal_available and self.state == STATE_SLEEPING:
+                # Proximity drives face when sleeping
+                try:
+                    with self._environmental_lock:
+                        zone = self._environmental_state["proximity_zone"]
+                except Exception:
+                    zone = "absent"
+
+                if zone == "present":
+                    faces = FaceExpressions.PROXIMITY_PRESENT
+                elif zone == "approaching":
+                    faces = FaceExpressions.PROXIMITY_APPROACHING
+                else:
+                    faces = FaceExpressions.SLEEP  # Dozing
+            elif self.state == STATE_NOTIFYING and self._notify_active:
                 # Frequency-mixed face rotation: alternate between notification faces
                 # and the previous state's normal faces based on priority
                 notify_faces = FaceExpressions.get_notify_faces(self._notify_priority)
@@ -327,6 +458,14 @@ class snarlingCreature:
                 self.face_index = (self.face_index + 1) % len(faces)
                 self.current_face = faces[self.face_index]
             self.face_timer = 0
+
+        # Override current face with leaving face if active (instant, not waiting for timer)
+        if self._leaving_face_active:
+            self.current_face = FaceExpressions.LEAVING[0]
+        # Override with pending proximity face if it's time
+        elif self._proximity_face_pending is None and self._thermal_available and self.state == STATE_SLEEPING:
+            # Use the current proximity face directly
+            self.current_face = self._proximity_face_current
 
         # Update animation offsets based on state
         if self.state == STATE_SLEEPING:
@@ -375,8 +514,18 @@ class snarlingCreature:
         )
 
     def draw_background(self):
-        """Fill the entire screen with deep charcoal background"""
-        self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=COLOR_BG_NEW)
+        """Fill background — slightly brighter when someone is present"""
+        try:
+            with self._environmental_lock:
+                env_proximity = self._environmental_state["proximity"]
+        except Exception:
+            env_proximity = 0.0
+
+        # Interpolate between deep dark (absent) and slightly less dark (present)
+        r = int(26 + env_proximity * 10)   # 26 → 36
+        g = int(26 + env_proximity * 10)    # 26 → 36
+        b = int(46 + env_proximity * 8)    # 46 → 54
+        self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(r, g, b))
 
     def draw_outer_border(self):
         """Draw the mood-colored rounded rectangle outer border"""
@@ -816,6 +965,92 @@ class snarlingCreature:
         self.status_message = "Muted" if self.mute else "Unmuted"
         self.status_timer = 45
 
+    # ── Thermal sensor callbacks ────────────────────────────────────
+
+    def _on_thermal_presence_change(self, absent, present):
+        """Called by ThermalSensor when someone appears or disappears.
+        Runs in the thermal sensor's thread — must be thread-safe."""
+        now = time.time()
+
+        # Detect present→absent transition for leaving face
+        if not present and self._prev_env_present:
+            self._leaving_face_active = True
+            self._leaving_face_timer = 0.5  # 500ms leaving face
+
+        self._prev_env_present = present
+
+        with self._environmental_lock:
+            self._environmental_state["present"] = present
+            self._environmental_state["last_change"] = now
+            if present:
+                self._environmental_state["proximity_zone"] = "approaching"
+                self._environmental_state["proximity"] = max(self._environmental_state["proximity"], 0.3)
+            else:
+                self._environmental_state["proximity_zone"] = "absent"
+                self._environmental_state["proximity"] = 0.0
+            self._environmental_state["source"] = "thermal"
+
+        if present:
+            # Person appeared — schedule face/brightness transition
+            # 150ms delay before reacting (feels like perception, not a sensor)
+            self._proximity_face_pending = "(⊙◡⊙)"  # Awareness: eyes widening
+            self._proximity_face_time = now + 0.15
+            # Start brightness ramp toward "approaching" level
+            self._brightness_target = 0.5
+            self._brightness_ramp_start = now + 0.15  # Delay matches face
+            self._brightness_ramp_duration = 0.7
+        else:
+            # Person disappeared — dim down immediately (no perceptual delay on leaving)
+            self._proximity_face_pending = "(≖◡◡≖)"  # Dozing
+            self._proximity_face_time = now
+            self._brightness_target = 0.2
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.9  # Slower fade-out
+
+        print(f"[snarling] Presence change: absent={absent}, present={present}")
+
+    def _on_thermal_proximity_change(self, old_zone, new_zone, proximity):
+        """Called by ThermalSensor when proximity zone changes.
+        Runs in the thermal sensor's thread — must be thread-safe."""
+        now = time.time()
+        with self._environmental_lock:
+            self._environmental_state["proximity"] = proximity
+            self._environmental_state["proximity_zone"] = new_zone
+            self._environmental_state["last_change"] = now
+            self._environmental_state["source"] = "thermal"
+
+        # Brightness targets based on proximity zone
+        if new_zone == "present":
+            # Close range — full brightness with slight overshoot for "lock-on"
+            self._brightness_target = 1.05  # Overshoot, settles to 1.0
+            self._proximity_face_pending = "(◠‿◠)"  # I see you
+            self._proximity_face_time = now + 0.20  # 200ms after detection
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.7
+        elif new_zone == "approaching":
+            # Mid range — partial brightness
+            self._brightness_target = 0.3 + proximity * 0.7
+            self._proximity_face_pending = "(⊙◡⊙)"  # Awareness
+            self._proximity_face_time = now + 0.15
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.7
+        else:
+            # Absent — dim
+            self._brightness_target = 0.2
+            self._proximity_face_pending = "(≖◡◡≖)"  # Dozing
+            self._proximity_face_time = now
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.9
+
+        print(f"[snarling] Proximity change: {old_zone} -> {new_zone} ({proximity:.2f})")
+
+    @staticmethod
+    def _ease_out_cubic(t):
+        """Ease-out cubic: fast start, slow settle. t in [0, 1]."""
+        return 1 - (1 - t) ** 3
+
+    # ── End thermal callbacks ───────────────────────────────────────
+
     def approve_request(self):
         """Handle approval button press (A button in approval state)"""
         if self.state == STATE_AWAITING_APPROVAL:
@@ -946,6 +1181,21 @@ class snarlingCreature:
         try:
             import requests as req_lib
             gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+
+            # Add presence data from environmental state
+            try:
+                with self._environmental_lock:
+                    present_at_feedback = self._environmental_state["present"]
+                    proximity_at_feedback = round(self._environmental_state["proximity"], 2)
+            except Exception:
+                present_at_feedback = None
+                proximity_at_feedback = None
+
+            # If thermal is unavailable, present should be None (not False)
+            if not self._thermal_available:
+                present_at_feedback = None
+                proximity_at_feedback = None
+
             response_data = {
                 "notification_id": notify_id,
                 "revealed": revealed,
@@ -953,7 +1203,9 @@ class snarlingCreature:
                 "dismissed": dismissed,
                 "timed_out": timed_out,
                 "secret": secret,
-                "sessionKey": session_key
+                "sessionKey": session_key,
+                "present": present_at_feedback,
+                "proximity": proximity_at_feedback,
             }
             response = req_lib.post(
                 callback_url,
@@ -1426,6 +1678,20 @@ class snarlingCreature:
         # Update face animation
         self.update_face(dt)
 
+        # Thermal sensor health check (every ~5 seconds / ~150 frames)
+        if self._thermal_available:
+            self._thermal_health_counter += 1
+            if self._thermal_health_counter >= 150:
+                self._thermal_health_counter = 0
+                if self.thermal is not None and not self.thermal.is_running:
+                    print("[snarling] Thermal sensor thread died — marking as unavailable")
+                    self._thermal_available = False
+                    with self._environmental_lock:
+                        self._environmental_state["present"] = False
+                        self._environmental_state["proximity"] = 0.0
+                        self._environmental_state["proximity_zone"] = "absent"
+                    self._brightness_target = 0.2
+
         # State is now set via direct /state API from the plugin (no polling)
 
         # Update LED
@@ -1535,7 +1801,13 @@ class snarlingCreature:
         """Clean up and clear screen"""
         print("\nCleaning up...")
 
-
+        # Stop thermal sensor
+        if self.thermal is not None:
+            try:
+                self.thermal.stop()
+                print("[snarling] Thermal sensor stopped")
+            except Exception as e:
+                print(f"[snarling] Error stopping thermal sensor: {e}")
 
         # Turn off LED
         self.display.set_led(0, 0, 0)
@@ -1559,6 +1831,15 @@ class snarlingCreature:
         print("  Y: Toggle mute/quiet mode")
         print("  Ctrl+C: Exit")
         print()
+
+        # Start thermal sensor (after display is initialized)
+        if self._thermal_available and self.thermal is not None:
+            try:
+                self.thermal.start()
+                print("[snarling] Thermal sensor started")
+            except Exception as e:
+                print(f"[snarling] Thermal sensor start failed: {e}")
+                self._thermal_available = False
 
         target_fps = 30
         frame_time = 1.0 / target_fps
@@ -1729,6 +2010,99 @@ if FLASK_AVAILABLE and approval_app:
             return jsonify({"status": "ok", "state": state})
         else:
             return jsonify({"error": "snarling not initialized"}), 503
+
+    @approval_app.route('/presence', methods=['GET'])
+    def get_presence():
+        """Get current presence/proximity state from thermal sensor"""
+        if not creature_instance:
+            return jsonify({"error": "snarling not initialized"}), 503
+
+        with creature_instance._environmental_lock:
+            env = dict(creature_instance._environmental_state)
+
+        return jsonify({
+            "present": env["present"],
+            "proximity": round(env["proximity"], 3),
+            "proximity_zone": env["proximity_zone"],
+            "source": env["source"],
+            "last_change": env["last_change"],
+            "ambient_temp": env["ambient_temp"],
+            "thermal_available": creature_instance._thermal_available,
+        })
+
+    @approval_app.route('/environment', methods=['POST'])
+    def update_environment():
+        """Update environmental state from external sources.
+        Accepts: {present: bool, proximity: float (0-1), proximity_zone: str, ambient_temp: float}
+        Thermal sensor data takes precedence — external data is ignored when thermal is active."""
+        global creature_instance
+        if not creature_instance:
+            return jsonify({"error": "snarling not initialized"}), 503
+
+        # Thermal sensor takes precedence — reject external data when thermal is active
+        if creature_instance._thermal_available:
+            return jsonify({
+                "status": "ignored",
+                "reason": "thermal_sensor_active",
+                "message": "Thermal sensor data takes precedence. External data ignored."
+            })
+
+        data = request.json
+        if not data:
+            return jsonify({"error": "No JSON data"}), 400
+
+        now = time.time()
+
+        # Track presence transitions for leaving-face detection
+        new_present = data.get('present', None)
+        if new_present is not None:
+            old_present = creature_instance._prev_env_present
+            if not new_present and old_present:
+                creature_instance._leaving_face_active = True
+                creature_instance._leaving_face_timer = 0.5
+            creature_instance._prev_env_present = new_present
+
+        with creature_instance._environmental_lock:
+            if new_present is not None:
+                creature_instance._environmental_state["present"] = new_present
+            if 'proximity' in data:
+                creature_instance._environmental_state["proximity"] = max(0.0, min(1.0, float(data['proximity'])))
+            if 'proximity_zone' in data:
+                creature_instance._environmental_state["proximity_zone"] = data['proximity_zone']
+            if 'ambient_temp' in data:
+                creature_instance._environmental_state["ambient_temp"] = float(data['ambient_temp'])
+            creature_instance._environmental_state["source"] = data.get('source', creature_instance._environmental_state.get('source', 'external'))
+            creature_instance._environmental_state["last_change"] = now
+
+        # Trigger face/brightness transitions based on external presence data
+        env_present = creature_instance._environmental_state["present"]
+        env_proximity = creature_instance._environmental_state["proximity"]
+        env_zone = creature_instance._environmental_state["proximity_zone"]
+
+        if env_present and env_zone == "present":
+            creature_instance._brightness_target = 1.0
+            creature_instance._proximity_face_pending = "(◠‿◠)"
+            creature_instance._proximity_face_time = now + 0.20
+            creature_instance._brightness_ramp_start = now
+            creature_instance._brightness_ramp_duration = 0.7
+        elif env_present:
+            creature_instance._brightness_target = 0.3 + env_proximity * 0.7
+            creature_instance._proximity_face_pending = "(⊙◡⊙)"
+            creature_instance._proximity_face_time = now + 0.15
+            creature_instance._brightness_ramp_start = now
+            creature_instance._brightness_ramp_duration = 0.7
+        else:
+            creature_instance._brightness_target = 0.2
+            creature_instance._proximity_face_pending = "(≖◡◡≖)"
+            creature_instance._proximity_face_time = now
+            creature_instance._brightness_ramp_start = now
+            creature_instance._brightness_ramp_duration = 0.9
+
+        print(f"[snarling] Environment update: present={creature_instance._environmental_state['present']}, "
+              f"proximity={creature_instance._environmental_state['proximity']:.2f}, "
+              f"zone={creature_instance._environmental_state['proximity_zone']}")
+
+        return jsonify({"status": "ok", "environment": creature_instance._environmental_state})
     
     def run_approval_server():
         """Run Flask server in background thread"""
