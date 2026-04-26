@@ -2,13 +2,13 @@
 
 <img width="800" height="800" alt="Snarling" src="https://github.com/user-attachments/assets/6a5f9196-0bcd-40ef-b045-28a8a6755dbb" />
 
-**A physical status companion for OpenClaw agents.** A Raspberry Pi-powered display that lives on your desk and shows what your AI is doing — even when you're not looking at a screen.
+**A physical status companion for OpenClaw agents.** A Raspberry Pi-powered display that lives on your desk and shows what your AI is doing — even when you're not looking at a screen. It also lets your agent send you notifications with a feedback loop, so it can learn when and how to reach out.
 
 Inspired by [Pwnagotchi](https://pwnagotchi.ai/), built for OpenClaw.
 
 ## What It Does
 
-Snarling is a tiny creature on a tiny screen. It reacts to your agent's state in real time — sleeping when idle, focused when processing, chatty when responding, and alert when it needs your approval on something.
+Snarling is a tiny creature on a tiny screen. It reacts to your agent's state in real time — sleeping when idle, focused when processing, chatty when responding, and alert when it needs your approval on something. It can also nudge you with notifications — subtle at first, revealing more when you press A — and report back whether you actually read them, enabling notification attunement.
 
 Instead of checking your phone or terminal to see if your agent is working, resting, or needs attention — just glance at Snarling.
 
