@@ -275,7 +275,9 @@ class snarlingCreature:
         self.running = False
 
     def update_led(self):
-        """Update LED based on state, breathing animation, and proximity"""
+        """Update LED based on state, breathing animation, and proximity.
+        State sets the LED color/pattern. Proximity adds a warm glow on top.
+        When sleeping with no active state LED, proximity drives the LED fully."""
         # Turn off LED when screen is asleep
         if self.screen_asleep:
             self.display.set_led(0, 0, 0)
@@ -291,78 +293,76 @@ class snarlingCreature:
             env_proximity = 0.0
 
         # Calculate proximity brightness using exponential smoothing
-        now = time.time()
         frame_dt = 1.0 / 30.0  # ~30fps
         alpha = 1 - math.exp(-frame_dt / 0.23)  # ~0.7s time constant
 
-        # If someone just arrived, start the ramp from current brightness
-        # If leaving, start from current brightness
         self._brightness_current += (self._brightness_target - self._brightness_current) * alpha
         # Clamp overshoot after settling
         if self._brightness_target <= 1.0 and self._brightness_current > 1.0:
-            # Decay overshoot (1.05 → 1.0) over ~200ms
             overshoot_alpha = 1 - math.exp(-frame_dt / 0.067)  # ~200ms settle
             self._brightness_current += (1.0 - self._brightness_current) * overshoot_alpha
 
         proximity_brightness = max(0.15, min(self._brightness_current, 1.0))
 
-        if self.led_timer > 0:
-            # State-change LED indication takes priority
+        # Determine base LED color from state
+        if self.led_timer > 0 or self.state in (STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_AWAITING_APPROVAL, STATE_NOTIFYING):
+            # State-driven LED colors
             if self.state == STATE_SLEEPING:
-                # Blue breathing LED (r, g, b as 0-1 floats)
                 brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
-                brightness *= 0.7  # Reduce by 30%
-                self.display.set_led(0, brightness * 0.25, brightness * 0.5)
+                brightness *= 0.7
+                base_r, base_g, base_b = 0, brightness * 0.25, brightness * 0.5
             elif self.state == STATE_PROCESSING:
-                # Melon LED hum (slow pulse)
                 pulse = 0.3 + 0.25 * math.sin(self.breath_phase * 1.5)
                 pulse *= 0.7
-                self.display.set_led(pulse * 0.99, pulse * 0.54, pulse * 0.45)
+                base_r, base_g, base_b = pulse * 0.99, pulse * 0.54, pulse * 0.45
             elif self.state == STATE_COMMUNICATING:
-                # Cyan pulsing
                 pulse = 0.5 + 0.5 * math.sin(self.breath_phase * 2)
                 pulse *= 0.7
-                self.display.set_led(0, pulse, pulse)
+                base_r, base_g, base_b = 0, pulse, pulse
             elif self.state == STATE_ERROR:
-                # Red alert
                 blink = 1.0 if int(self.breath_phase * 3) % 2 == 0 else 0.4
                 blink *= 0.7
-                self.display.set_led(blink, 0, 0)
+                base_r, base_g, base_b = blink, 0, 0
             elif self.state == STATE_AWAITING_APPROVAL:
-                # Red LED flash for approval alert
                 blink = 1.0 if int(self.breath_phase * 4) % 2 == 0 else 0.2
                 blink *= 0.7
-                self.display.set_led(blink, 0, 0)
+                base_r, base_g, base_b = blink, 0, 0
             elif self.state == STATE_NOTIFYING:
                 if self._notify_showing_notify_face:
-                    # Priority-colored LED flash when showing notification face
                     led_color = NOTIFY_LED_COLORS.get(self._notify_priority, NOTIFY_LED_COLORS['normal'])
-                    # Flash rate: high=fast, normal=medium, low=slow
                     flash_rates = {'high': 6, 'normal': 3, 'low': 1.5}
                     rate = flash_rates.get(self._notify_priority, 3)
                     blink = 1.0 if int(self.breath_phase * rate) % 2 == 0 else 0.3
                     blink *= 0.7
-                    self.display.set_led(
-                        led_color[0] * blink,
-                        led_color[1] * blink,
-                        led_color[2] * blink
-                    )
+                    base_r = led_color[0] * blink
+                    base_g = led_color[1] * blink
+                    base_b = led_color[2] * blink
                 else:
-                    # LED off when showing pre-state (normal) face
-                    self.display.set_led(0, 0, 0)
+                    base_r, base_g, base_b = 0, 0, 0
+            else:
+                base_r, base_g, base_b = 0, 0, 0
+
+            # Composite: add a warm proximity glow on top of the state LED
+            # Makes even processing/communicating feel slightly different when you're nearby
+            if self._thermal_available and env_present and env_proximity > 0.1:
+                warmth_mix = env_proximity * 0.3  # subtle — 30% max mix
+                base_r = min(1.0, base_r + warmth_mix * 0.5)   # warm red
+                base_g = min(1.0, base_g + warmth_mix * 0.15)  # tiny green
+
+            self.display.set_led(base_r, base_g, base_b)
+
         elif self._thermal_available and env_present:
-            # Proximity-driven LED: warm slow pulse proportional to proximity
+            # Sleeping (no state LED timer) + person present: proximity drives LED fully
             pulse = 0.3 + 0.4 * math.sin(self.breath_phase * 0.8) * env_proximity
-            warmth = env_proximity  # 0.0 = cool, 1.0 = warm
+            warmth = env_proximity
             self.display.set_led(
-                pulse * warmth * 0.8,      # Red component (warmth)
-                pulse * 0.3,                 # Green (subtle)
-                pulse * (1 - warmth) * 0.5   # Blue (cool when distant)
+                pulse * warmth * 0.8,
+                pulse * 0.3,
+                pulse * (1 - warmth) * 0.5
             )
         elif self.led_timer <= 0:
             # No state LED timer and no proximity — gentle breathing or off
             if self.state == STATE_SLEEPING:
-                # Cool slow breathing (default sleeping)
                 brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
                 brightness *= 0.7
                 self.display.set_led(0, brightness * 0.25, brightness * 0.5)
