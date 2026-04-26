@@ -9,9 +9,14 @@ from displayhatmini import DisplayHATMini
 from PIL import Image, ImageDraw, ImageFont
 import time
 import math
+import random
 import signal
 import sys
 import json
+
+# Fix output buffering so print statements show up immediately in logs
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 # Import OpenClaw integration
 # OpenClaw polling client removed — state is now set via direct /state API from the plugin
@@ -27,14 +32,46 @@ STATE_PROCESSING = "processing"
 STATE_COMMUNICATING = "communicating"
 STATE_ERROR = "error"
 STATE_AWAITING_APPROVAL = "awaiting_approval"
+STATE_NOTIFYING = "notifying"
 
 # Color constants
-COLOR_BG = (20, 30, 40)
+COLOR_BG = (26, 26, 46)       # Deep charcoal #1A1A2E
 COLOR_TEXT = (255, 255, 255)
 COLOR_SLEEP = (100, 150, 255)
 COLOR_PROCESS = (255, 168, 148)  # Light melon
 COLOR_COMM = (0, 255, 220)
 COLOR_ERROR = (255, 80, 80)
+
+# New design system colors
+COLOR_BG_NEW = (26, 26, 46)        # Deep charcoal #1A1A2E
+COLOR_INNER_FRAME = (255, 255, 255) # White inner frame
+COLOR_BUTTON_INDICATOR = (80, 80, 100)  # Soft grey for button hints
+COLOR_STATUS_BOX = (255, 255, 255)  # White status boxes
+COLOR_STATUS_DIM = (60, 60, 80)    # Dim/off status boxes
+COLOR_BANNER_BG = (42, 42, 62)    # Slightly lighter dark for banner area #2A2A3E
+COLOR_SEPARATOR = (255, 255, 255)  # White separator line
+
+# Design system dimensions
+BORDER_MARGIN = 5             # Outer border margin from screen edges
+BORDER_RADIUS = 18            # Outer border corner radius
+BORDER_WIDTH = 5              # Outer border stroke width
+INNER_FRAME_INSET = 10        # Inner frame inset from outer border
+INNER_FRAME_WIDTH = 1         # Inner frame stroke width
+BUTTON_W = 20                 # Button indicator width
+BUTTON_H = 14                 # Button indicator height
+BUTTON_RADIUS = 4             # Button indicator corner radius
+BUTTON_MARGIN = 8             # Button indicator margin from inner frame
+STATUS_BOX_SIZE = 8           # Status box size (px)
+STATUS_BOX_GAP = 4            # Gap between status boxes
+STATUS_BOX_Y = 0              # Will be calculated relative to top
+BANNER_HEIGHT = 80            # Banner area height when visible
+
+# Notification LED colors by priority
+NOTIFY_LED_COLORS = {
+    'high': (0.5, 0.15, 0.0),      # Red-orange (50%)
+    'normal': (0.5, 0.3, 0.0),     # Yellow-orange (50%)
+    'low': (0.5, 0.5, 0.0),        # Yellow (50%)
+}
 
 # Pwnagotchi-style ASCII face expressions with animations
 
@@ -56,8 +93,16 @@ class FaceExpressions:
     # Awaiting approval faces - alert, watching
     AWAITING_APPROVAL = ['( ⚆_⚆)', '(☉_☉ )']
 
+    # Notification faces - priority-based
+    # High: urgent, demanding attention
+    NOTIFY_HIGH = ['(☉_☉)', '(ಠ_ಠ)', '(⚠_⚠)']
+    # Normal: informative, curious, aware
+    NOTIFY_NORMAL = ['(•_•)', '(◡_◡)', '(⊙_⊙)', '(◉_◉)']
+    # Low: gentle, slight perk, relaxed
+    NOTIFY_LOW = ['(◠‿◠)']
+
     @classmethod
-    def get_faces_for_state(cls, state):
+    def get_faces_for_state(cls, state, priority=None):
         """Get appropriate faces for a given state"""
         if state == STATE_SLEEPING:
             return cls.SLEEP
@@ -69,7 +114,20 @@ class FaceExpressions:
             return cls.ERROR
         elif state == STATE_AWAITING_APPROVAL:
             return cls.AWAITING_APPROVAL
+        elif state == STATE_NOTIFYING:
+            return cls.get_notify_faces(priority or 'normal')
         return cls.SLEEP
+
+    @classmethod
+    def get_notify_faces(cls, priority):
+        """Get notification faces for a given priority level"""
+        if priority == 'high':
+            return cls.NOTIFY_HIGH
+        elif priority == 'normal':
+            return cls.NOTIFY_NORMAL
+        elif priority == 'low':
+            return cls.NOTIFY_LOW
+        return cls.NOTIFY_NORMAL
 
 class snarlingCreature:
     """Main creature class"""
@@ -98,6 +156,31 @@ class snarlingCreature:
         self.animation_offset_x = 0
         self.animation_offset_y = 0
 
+        # Notification state
+        self._notify_active = False
+        self._notify_priority = 'normal'
+        self._notify_message = ''
+        self._notify_start_time = 0
+        self._notify_text_revealed = False
+        self._notify_pre_state = STATE_SLEEPING  # state to return to after notification
+        self._notify_showing_notify_face = False  # True when current face is a notification face
+        self._notify_id = None           # notification_id from plugin
+        self._notify_callback_url = None  # where to POST feedback
+        self._notify_session_key = None   # session routing
+        self._notify_secret = None        # auth secret (same APPROVAL_SECRET)
+        self._notify_duration = 0         # auto-dismiss timeout in seconds (0 = use priority-based default: low=300s, others=no timeout)
+        self._notify_sent_time = 0       # when the notification was sent (epoch) — for computing total time-to-reveal including queue
+
+        # Notification stack (priority-sorted pending queue)
+        self._notify_stack = []  # list of {"message": str, "priority": str, "_seq": int, "notification_id": str|None, "callback_url": str|None, "session_key": str|None, "secret": str|None, "duration": int}
+        self._notify_seq = 0  # monotonically increasing insertion counter for LIFO within same priority
+
+        # Banner cycling (may already exist via set_notification, but init here too)
+        self._notify_banners = []
+        self._notify_banner_index = 0
+        self._notify_banner_timer = 0
+        self._notify_banner_interval = 45
+
         # LED brightness for breathing (0-1)
         self.led_brightness = 0.5
 
@@ -108,7 +191,7 @@ class snarlingCreature:
 
 
         # Initialize display
-        self.img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG)
+        self.img = Image.new("RGB", (WIDTH, HEIGHT), COLOR_BG_NEW)
         self.draw = ImageDraw.Draw(self.img)
         self.display = DisplayHATMini(self.img)
 
@@ -164,12 +247,48 @@ class snarlingCreature:
                 blink = 1.0 if int(self.breath_phase * 4) % 2 == 0 else 0.2
                 blink *= 0.7  # Reduce by 30%
                 self.display.set_led(blink, 0, 0)
+            elif self.state == STATE_NOTIFYING:
+                if self._notify_showing_notify_face:
+                    # Priority-colored LED flash when showing notification face
+                    led_color = NOTIFY_LED_COLORS.get(self._notify_priority, NOTIFY_LED_COLORS['normal'])
+                    # Flash rate: high=fast, normal=medium, low=slow
+                    flash_rates = {'high': 6, 'normal': 3, 'low': 1.5}
+                    rate = flash_rates.get(self._notify_priority, 3)
+                    blink = 1.0 if int(self.breath_phase * rate) % 2 == 0 else 0.3
+                    blink *= 0.7
+                    self.display.set_led(
+                        led_color[0] * blink,
+                        led_color[1] * blink,
+                        led_color[2] * blink
+                    )
+                else:
+                    # LED off when showing pre-state (normal) face
+                    self.display.set_led(0, 0, 0)
         else:
             # LED off
             self.display.set_led(0, 0, 0)
 
     def get_color(self):
-        """Get current color based on state"""
+        """Get current color based on state (and face type during notifications)"""
+        if self.state == STATE_NOTIFYING:
+            # When showing a notification face, use notification color;
+            # when showing the normal pre-state face, use that state's color
+            if self._notify_showing_notify_face:
+                notify_colors = {
+                    'high': (255, 140, 50),    # warm red-orange
+                    'normal': (255, 200, 80),   # yellow-orange
+                    'low': (200, 200, 100),      # soft yellow
+                }
+                return notify_colors.get(self._notify_priority, notify_colors['normal'])
+            else:
+                # Return the color for whatever state we were in before the notification
+                pre_colors = {
+                    STATE_SLEEPING: COLOR_SLEEP,
+                    STATE_PROCESSING: COLOR_PROCESS,
+                    STATE_COMMUNICATING: COLOR_COMM,
+                    STATE_ERROR: COLOR_ERROR,
+                }
+                return pre_colors.get(self._notify_pre_state, COLOR_SLEEP)
         colors = {
             STATE_SLEEPING: COLOR_SLEEP,
             STATE_PROCESSING: COLOR_PROCESS,
@@ -188,7 +307,22 @@ class snarlingCreature:
         # Update face timer for expression changes
         self.face_timer += dt
         if self.face_timer > 2.0:  # Change face every 2 seconds for more variety
-            faces = FaceExpressions.get_faces_for_state(self.state)
+            if self.state == STATE_NOTIFYING and self._notify_active:
+                # Frequency-mixed face rotation: alternate between notification faces
+                # and the previous state's normal faces based on priority
+                notify_faces = FaceExpressions.get_notify_faces(self._notify_priority)
+                pre_faces = FaceExpressions.get_faces_for_state(self._notify_pre_state)
+                # Priority-based probability of showing notification face vs pre-state face
+                notify_probs = {'high': 0.8, 'normal': 0.4, 'low': 0.2}
+                prob = notify_probs.get(self._notify_priority, 0.4)
+                if random.random() < prob:
+                    faces = notify_faces
+                    self._notify_showing_notify_face = True
+                else:
+                    faces = pre_faces
+                    self._notify_showing_notify_face = False
+            else:
+                faces = FaceExpressions.get_faces_for_state(self.state, getattr(self, '_notify_priority', None))
             if faces:
                 self.face_index = (self.face_index + 1) % len(faces)
                 self.current_face = faces[self.face_index]
@@ -215,6 +349,200 @@ class snarlingCreature:
             # Alert movement - quick jitter
             self.animation_offset_x = int(4 * math.sin(self.breath_phase * 6))
             self.animation_offset_y = int(2 * math.cos(self.breath_phase * 5))
+        elif self.state == STATE_NOTIFYING:
+            if self._notify_priority == 'high':
+                # Quick jitter (like awaiting_approval)
+                self.animation_offset_x = int(4 * math.sin(self.breath_phase * 6))
+                self.animation_offset_y = int(2 * math.cos(self.breath_phase * 5))
+            elif self._notify_priority == 'normal':
+                # Slow side-to-side look
+                self.animation_offset_x = int(8 * math.sin(self.breath_phase * 1.0))
+                self.animation_offset_y = 0
+            else:
+                # low: gentle bob (like sleeping but slightly faster)
+                self.animation_offset_y = int(6 * math.sin(self.breath_phase * 0.8))
+                self.animation_offset_x = 0
+
+    def _is_banner_active(self):
+        """Check if a banner (notification, approval, or status message) is currently active and visible.
+        For notifications, the banner only counts as active when the user has pressed A to reveal text.
+        Before reveal, only a subtle hint is shown — no banner background or face shift."""
+        if self.state == STATE_NOTIFYING and self._notify_active:
+            return self._notify_text_revealed
+        return (
+            (self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners')) or
+            self.status_timer > 0
+        )
+
+    def draw_background(self):
+        """Fill the entire screen with deep charcoal background"""
+        self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=COLOR_BG_NEW)
+
+    def draw_outer_border(self):
+        """Draw the mood-colored rounded rectangle outer border"""
+        color = self.get_color()
+        # Outer border: rounded rectangle with thick stroke
+        self.draw.rounded_rectangle(
+            (BORDER_MARGIN, BORDER_MARGIN, WIDTH - BORDER_MARGIN, HEIGHT - BORDER_MARGIN),
+            radius=BORDER_RADIUS,
+            outline=color,
+            width=BORDER_WIDTH
+        )
+
+    def draw_inner_frame(self):
+        """Draw thin white inner frame for double-border effect"""
+        inset = BORDER_MARGIN + INNER_FRAME_INSET
+        self.draw.rounded_rectangle(
+            (inset, inset, WIDTH - inset, HEIGHT - inset),
+            radius=BORDER_RADIUS - 2,
+            outline=COLOR_INNER_FRAME,
+            width=INNER_FRAME_WIDTH
+        )
+
+    def draw_button_indicators(self):
+        """Draw 4 soft grey button indicators in corners: Y (top-left), B (top-right), X (bottom-left), A (bottom-right)
+        Top two (Y, B) always visible.
+        Bottom two (X, A) visible only when banner is hidden.
+        """
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1  # Inside inner frame
+        x_left = inset + BUTTON_MARGIN
+        x_right = WIDTH - inset - BUTTON_MARGIN - BUTTON_W
+        y_top = inset + BUTTON_MARGIN
+        y_bottom = HEIGHT - inset - BUTTON_MARGIN - BUTTON_H
+
+        # Button label font (tiny)
+        try:
+            btn_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 10
+            )
+        except OSError:
+            btn_font = ImageFont.load_default()
+
+        # Top-left: Y (always visible)
+        self.draw.rounded_rectangle(
+            (x_left, y_top, x_left + BUTTON_W, y_top + BUTTON_H),
+            radius=BUTTON_RADIUS,
+            fill=COLOR_BUTTON_INDICATOR
+        )
+        # Label
+        lbl_bbox = self.draw.textbbox((0, 0), "Y", font=btn_font)
+        lbl_w = lbl_bbox[2] - lbl_bbox[0]
+        lbl_h = lbl_bbox[3] - lbl_bbox[1]
+        self.draw.text(
+            (x_left + (BUTTON_W - lbl_w) // 2, y_top + (BUTTON_H - lbl_h) // 2 - 1),
+            "Y", fill=(200, 200, 220), font=btn_font
+        )
+
+        # Top-right: B (always visible)
+        self.draw.rounded_rectangle(
+            (x_right, y_top, x_right + BUTTON_W, y_top + BUTTON_H),
+            radius=BUTTON_RADIUS,
+            fill=COLOR_BUTTON_INDICATOR
+        )
+        lbl_bbox = self.draw.textbbox((0, 0), "B", font=btn_font)
+        lbl_w = lbl_bbox[2] - lbl_bbox[0]
+        lbl_h = lbl_bbox[3] - lbl_bbox[1]
+        self.draw.text(
+            (x_right + (BUTTON_W - lbl_w) // 2, y_top + (BUTTON_H - lbl_h) // 2 - 1),
+            "B", fill=(200, 200, 220), font=btn_font
+        )
+
+        # Bottom-left: X (only when no banner)
+        banner_active = (
+            (self.state == STATE_NOTIFYING and self._notify_active) or
+            (self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners')) or
+            self.status_timer > 0
+        )
+        if not banner_active:
+            self.draw.rounded_rectangle(
+                (x_left, y_bottom, x_left + BUTTON_W, y_bottom + BUTTON_H),
+                radius=BUTTON_RADIUS,
+                fill=COLOR_BUTTON_INDICATOR
+            )
+            lbl_bbox = self.draw.textbbox((0, 0), "X", font=btn_font)
+            lbl_w = lbl_bbox[2] - lbl_bbox[0]
+            lbl_h = lbl_bbox[3] - lbl_bbox[1]
+            self.draw.text(
+                (x_left + (BUTTON_W - lbl_w) // 2, y_bottom + (BUTTON_H - lbl_h) // 2 - 1),
+                "X", fill=(200, 200, 220), font=btn_font
+            )
+
+            # Bottom-right: A (only when no banner)
+            self.draw.rounded_rectangle(
+                (x_right, y_bottom, x_right + BUTTON_W, y_bottom + BUTTON_H),
+                radius=BUTTON_RADIUS,
+                fill=COLOR_BUTTON_INDICATOR
+            )
+            lbl_bbox = self.draw.textbbox((0, 0), "A", font=btn_font)
+            lbl_w = lbl_bbox[2] - lbl_bbox[0]
+            lbl_h = lbl_bbox[3] - lbl_bbox[1]
+            self.draw.text(
+                (x_right + (BUTTON_W - lbl_w) // 2, y_bottom + (BUTTON_H - lbl_h) // 2 - 1),
+                "A", fill=(200, 200, 220), font=btn_font
+            )
+
+    def draw_status_boxes(self):
+        """Draw 5 status squares at top center based on state:
+        - Processing: fill progressively (1/5, 2/5, etc.)
+        - Idle/communicating: all 5 solid white
+        - Sleeping: all dim/off
+        - Approval: all 5 solid red
+        - Notification: fill based on priority count
+        """
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        total_width = 5 * STATUS_BOX_SIZE + 4 * STATUS_BOX_GAP
+        start_x = (WIDTH - total_width) // 2
+        y = inset + 4  # Touching the white inner frame
+
+        # Determine fill level and color
+        if self.state == STATE_SLEEPING:
+            fill_count = 0
+            box_color = COLOR_STATUS_DIM
+        elif self.state == STATE_PROCESSING:
+            # Progressive fill: cycle through 1-5 based on animation
+            fill_count = (self.face_index % 5) + 1
+            box_color = COLOR_STATUS_BOX
+        elif self.state == STATE_AWAITING_APPROVAL:
+            fill_count = 5
+            box_color = COLOR_ERROR  # Red
+        elif self.state == STATE_NOTIFYING and self._notify_active:
+            # Fill based on priority: high=5, normal=3, low=1
+            priority_fill = {'high': 5, 'normal': 3, 'low': 1}
+            fill_count = priority_fill.get(self._notify_priority, 3)
+            notify_box_colors = {
+                'high': (255, 140, 50),    # warm red-orange
+                'normal': (255, 200, 80),   # yellow-orange
+                'low': (200, 200, 100),      # soft yellow
+            }
+            box_color = notify_box_colors.get(self._notify_priority, (255, 200, 80))
+        else:
+            # Idle / communicating / error: all 5 solid
+            fill_count = 5
+            box_color = COLOR_STATUS_BOX
+
+        for i in range(5):
+            x = start_x + i * (STATUS_BOX_SIZE + STATUS_BOX_GAP)
+            color = box_color if i < fill_count else COLOR_STATUS_DIM
+            self.draw.rounded_rectangle(
+                (x, y, x + STATUS_BOX_SIZE, y + STATUS_BOX_SIZE),
+                radius=1,
+                fill=color
+            )
+
+    def draw_separator(self):
+        """Draw thin white horizontal line between face area and banner area.
+        Only visible when banner is active."""
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        sep_y = HEIGHT - inset - BANNER_HEIGHT
+        self.draw.line(
+            (inset + 1, sep_y, WIDTH - inset - 1, sep_y),
+            fill=COLOR_SEPARATOR,
+            width=1
+        )
+
+    def draw_banner_background(self):
+        """No filled background below separator — just the line."""
+        pass
 
     def draw_face(self):
         """Draw the face expression in the center of the screen using DejaVuSansMono like pwnagotchi"""
@@ -223,7 +551,7 @@ class snarlingCreature:
 
         # Cache font lookup on first call - use DejaVuSansMono like pwnagotchi
         if not hasattr(self, '_cached_font'):
-            self._cached_font_size = 48
+            self._cached_font_size = 62
             
             try:
                 # Use DejaVuSansMono-Bold like pwnagotchi
@@ -279,8 +607,10 @@ class snarlingCreature:
             text_img = text_img.resize(final_size, Image.Resampling.LANCZOS)
 
         # Center position with animation offsets
+        # Shift face up slightly to account for banner area at bottom
+        face_y_offset = -20 if self._is_banner_active() else 0
         x = (WIDTH - text_img.width) // 2 + self.animation_offset_x
-        y = (HEIGHT - text_img.height) // 2 + self.animation_offset_y - 10
+        y = (HEIGHT - text_img.height) // 2 + self.animation_offset_y + face_y_offset - 10
 
         # Paste with alpha blending
         if text_img.mode == 'RGBA':
@@ -290,17 +620,92 @@ class snarlingCreature:
             self.img.paste(text_img, (x, y))
 
     def draw_status(self):
-        """Draw status bar at bottom"""
+        """Draw status banners at bottom within the banner area.
+        Banner backgrounds are drawn by draw_banner_background() called from draw_frame().
+        This method only draws text and other overlay content."""
+        inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        banner_top = HEIGHT - inset - BANNER_HEIGHT + 4  # Small padding from separator
+        banner_bottom = HEIGHT - inset - 4  # Small padding from bottom
+        text_left = inset + 10
+        text_right = WIDTH - inset - 30
+        max_text_width = text_right - text_left
+
         # Mute indicator
         if self.mute:
-            self.draw.text((10, HEIGHT - 25), "🔇", fill=(150, 150, 150))
+            self.draw.text((text_left, banner_bottom - 20), "🔇", fill=(150, 150, 150))
 
-        # State indicator
-        state_text = f"State: {self.state.upper()}"
-        self.draw.text((WIDTH - 120, HEIGHT - 25), state_text, fill=(200, 200, 200))
+        # State indicator (only show when no active banner)
+        if not self._is_banner_active():
+            try:
+                state_font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 14
+                )
+            except OSError:
+                state_font = ImageFont.load_default()
+            state_text = f"{self.state.upper()}"
+            bbox = self.draw.textbbox((0, 0), state_text, font=state_font)
+            st_w = bbox[2] - bbox[0]
+            # Center the state text horizontally
+            st_x = (WIDTH - st_w) // 2
+            self.draw.text((st_x, banner_bottom - 18), state_text, fill=(80, 80, 100), font=state_font)
+
+        # Notification banners/hints
+        if self.state == STATE_NOTIFYING and self._notify_active:
+            try:
+                notify_font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
+                )
+                hint_font = ImageFont.truetype(
+                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 18
+                )
+            except OSError:
+                notify_font = ImageFont.load_default()
+                hint_font = notify_font
+
+            if self._notify_text_revealed:
+                # Advance banner timer and swap (same pattern as approval banners)
+                self._notify_banner_timer += 1
+                if self._notify_banner_timer >= self._notify_banner_interval:
+                    self._notify_banner_timer = 0
+                    self._notify_banner_index = (self._notify_banner_index + 1) % len(self._notify_banners)
+
+                try:
+                    header_font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
+                    )
+                    msg_font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
+                    )
+                except OSError:
+                    header_font = ImageFont.load_default()
+                    msg_font = header_font
+
+                lines = self._notify_banners[self._notify_banner_index]
+                is_banner1 = (self._notify_banner_index == 0)
+
+                if is_banner1:
+                    # Banner 1: header + preview (2 lines)
+                    total_notifications = 1 + len(self._notify_stack)
+                    if total_notifications > 1:
+                        count_indicator = f" ({1}/{total_notifications})"
+                        self.draw.text((text_left, banner_top), lines[0] + count_indicator, fill=(255, 200, 200), font=header_font)
+                    else:
+                        self.draw.text((text_left, banner_top), lines[0], fill=(255, 200, 200), font=header_font)
+                    if lines[1]:
+                        self.draw.text((text_left, banner_top + 28), lines[1], fill=(255, 255, 255), font=msg_font)
+                else:
+                    # Banner 2: word-wrapped message (3 lines)
+                    line_height = 22
+                    for i in range(min(len(lines), 3)):
+                        y = banner_top + (i * line_height)
+                        self.draw.text((text_left, y), lines[i], fill=(255, 255, 255), font=msg_font)
+            else:
+                # Show subtle hint so user knows they can interact
+                hint_text = "• A: read  B: dismiss"
+                self.draw.text((text_left, banner_top + 20), hint_text, fill=(120, 120, 140), font=hint_font)
 
         # Approval alternating banners
-        if self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners'):
+        elif self.state == STATE_AWAITING_APPROVAL and hasattr(self, '_approval_banners'):
             # Advance banner timer and swap
             self._approval_banner_timer += 1
             if self._approval_banner_timer >= self._approval_banner_interval:
@@ -318,69 +723,48 @@ class snarlingCreature:
                 header_font = ImageFont.load_default()
                 msg_font = header_font
 
-            # Banner background - height adapts to content
-            # Banner 1: 60px (2 lines), anchored above status bar
-            # Banner 2: 80px (3 lines), extends down over status bar area
             lines = self._approval_banners[self._approval_banner_index]
             is_banner1 = (self._approval_banner_index == 0)
-            if is_banner1:
-                banner_height = 60
-                overlay_top = HEIGHT - 30 - banner_height
-                overlay_bottom = HEIGHT - 30
-            else:
-                banner_height = 80
-                # Banner 2: same top as banner 1, but extends down into status bar area
-                overlay_top = HEIGHT - 30 - 60  # Same top as banner 1
-                overlay_bottom = overlay_top + banner_height  # = HEIGHT - 10
-            self.draw.rectangle((0, overlay_top, WIDTH, overlay_bottom), fill=(60, 20, 20))
 
             if is_banner1:
-                # Banner 1: red top header + white bottom detail
-                self.draw.text((10, overlay_top + 4), lines[0], fill=(255, 200, 200), font=header_font)
+                # Banner 1: header + action (2 lines)
+                self.draw.text((text_left, banner_top), lines[0], fill=(255, 200, 200), font=header_font)
                 if lines[1]:
-                    self.draw.text((10, overlay_top + 32), lines[1], fill=(255, 255, 255), font=msg_font)
+                    self.draw.text((text_left, banner_top + 28), lines[1], fill=(255, 255, 255), font=msg_font)
             else:
-                # Banner 2: up to 3 lines, same style (no red/white split)
+                # Banner 2: description (3 lines)
                 line_height = 22
                 for i in range(min(len(lines), 3)):
-                    y = overlay_top + 4 + (i * line_height)
-                    self.draw.text((10, y), lines[i], fill=(255, 255, 255), font=msg_font)
+                    y = banner_top + (i * line_height)
+                    self.draw.text((text_left, y), lines[i], fill=(255, 255, 255), font=msg_font)
 
-        # Status message overlay (non-approval)
+        # Status message overlay (non-approval, non-notification)
         elif self.status_timer > 0:
-            # Semi-transparent background (2x taller, grows upward from original position)
-            overlay_bottom = HEIGHT - 30
-            overlay_top = overlay_bottom - 60
-            overlay_left = 5
-            overlay_right = WIDTH - 20
-            self.draw.rectangle((0, overlay_top, overlay_right, overlay_bottom), fill=(40, 50, 60))
-            # Status text (regular weight, 24pt)
             try:
                 status_font = ImageFont.truetype(
                     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
                 )
             except OSError:
                 status_font = ImageFont.load_default()
-            # Word-wrap text within the box
-            max_width = overlay_right - overlay_left - 5
+            # Word-wrap text within the banner area
             words = self.status_message.split(' ')
             lines = []
             current_line = ''
             for word in words:
                 test_line = f'{current_line} {word}'.strip() if current_line else word
                 bbox = status_font.getbbox(test_line)
-                if bbox[2] - bbox[0] > max_width and current_line:
+                if bbox[2] - bbox[0] > max_text_width and current_line:
                     lines.append(current_line)
                     current_line = word
                 else:
                     current_line = test_line
             if current_line:
                 lines.append(current_line)
-            y = overlay_top + 5
+            y = banner_top
             for line in lines:
-                if y + 24 > overlay_bottom:
+                if y + 24 > banner_bottom:
                     break
-                self.draw.text((overlay_left, y), line, fill=(255, 255, 255), font=status_font)
+                self.draw.text((text_left, y), line, fill=(255, 255, 255), font=status_font)
                 y += 24
 
     def show_status_summary(self):
@@ -445,6 +829,9 @@ class snarlingCreature:
             # Return to sleeping state after approval
             self.state = STATE_SLEEPING
             self.led_timer = 0
+            # If notifications were queued during approval, show them now
+            if self._notify_stack:
+                self._activate_next_notification()
 
     def reject_request(self):
         """Handle rejection button press (B button in approval state)"""
@@ -459,9 +846,11 @@ class snarlingCreature:
             # Return to sleeping state after rejection
             self.state = STATE_SLEEPING
             self.led_timer = 0
+            # If notifications were queued during approval, show them now
+            if self._notify_stack:
+                self._activate_next_notification()
 
     def forward_approval_response(self, approved):
-        """Forward approval response to the OpenClaw webhook"""
         request_id = getattr(self, '_pending_approval_id', 'unknown')
         session_key = getattr(self, '_pending_session_key', None) or 'agent:main:main'
         print(f"[snarling] Forwarding approval for {request_id}: {'APPROVED' if approved else 'REJECTED'} (sessionKey={session_key})")
@@ -539,6 +928,343 @@ class snarlingCreature:
         except Exception as e:
             print(f"[snarling] Webhook call failed: {e}")
 
+    def forward_notification_feedback(self, revealed, time_to_reveal_sec, dismissed, timed_out=False, time_in_queue_sec=0):
+        """Send notification interaction feedback back to the gateway.
+        Mirrors forward_approval_response exactly: same gateway token, same auth, same WebSocket wake.
+        time_to_reveal_sec = display time only (from when notification appeared on screen)
+        time_in_queue_sec = time spent queued behind other notifications"""
+        notify_id = self._notify_id
+        callback_url = self._notify_callback_url
+        session_key = self._notify_session_key or 'agent:main:main'
+        secret = self._notify_secret
+
+        if not notify_id or not callback_url:
+            print(f"[snarling] No callback for notification (id={notify_id}, url={callback_url}) — skipping feedback")
+            return
+
+        print(f"[snarling] Forwarding notification feedback for {notify_id}: revealed={revealed}, time_to_reveal={time_to_reveal_sec + time_in_queue_sec:.1f}s (display={time_to_reveal_sec:.1f}s + queue={time_in_queue_sec:.1f}s), dismissed={dismissed}, timed_out={timed_out} (sessionKey={session_key})")
+        try:
+            import requests as req_lib
+            gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+            response_data = {
+                "notification_id": notify_id,
+                "revealed": revealed,
+                "time_to_reveal_sec": time_to_reveal_sec + time_in_queue_sec,  # total time from send to reveal
+                "dismissed": dismissed,
+                "timed_out": timed_out,
+                "secret": secret,
+                "sessionKey": session_key
+            }
+            response = req_lib.post(
+                callback_url,
+                json=response_data,
+                headers={"Authorization": f"Bearer {gateway_token}"},
+                timeout=5
+            )
+            print(f"[snarling] Notification callback status: {response.status_code}")
+            if response.status_code == 200:
+                print(f"[snarling] Gateway acknowledged: {response.json().get('message', 'OK')}")
+
+            # Wake approach: After the callback, use the OpenClaw WebSocket RPC
+            # API to trigger a heartbeat — same pattern as forward_approval_response.
+            try:
+                import threading
+                import json as json_mod
+
+                def delayed_wake():
+                    import time
+                    time.sleep(2)  # Wait for callback handler + session lane to fully unwind
+                    try:
+                        import websocket
+                        ws = websocket.create_connection(
+                            'ws://127.0.0.1:18789/ws',
+                            timeout=10,
+                            header=['Authorization: Bearer ' + gateway_token]
+                        )
+                        # Handle challenge-response handshake
+                        challenge_raw = ws.recv()
+                        challenge_data = json_mod.loads(challenge_raw)
+                        if challenge_data.get('event') == 'connect.challenge':
+                            nonce = challenge_data['payload']['nonce']
+                            ws.send(json_mod.dumps({'type': 'response', 'payload': {'nonce': nonce}}))
+                            print(f'[snarling] WebSocket challenge completed (notification feedback)')
+                        else:
+                            print(f'[snarling] Unexpected first message: {str(challenge_raw)[:100]}')
+
+                        # Trigger immediate heartbeat via RPC
+                        hb_msg = json_mod.dumps({
+                            'type': 'rpc',
+                            'method': 'system.runHeartbeatOnce',
+                            'params': {
+                                'sessionKey': session_key,
+                                'reason': 'hook:notification',
+                                'heartbeat': {'target': 'last'}
+                            }
+                        })
+                        ws.send(hb_msg)
+                        hb_result = ws.recv()
+                        print(f'[snarling] Heartbeat trigger result (notification): {str(hb_result)[:200]}')
+                        ws.close()
+                    except Exception as e:
+                        print(f'[snarling] WebSocket wake failed (notification): {e}')
+
+                wake_thread = threading.Thread(target=delayed_wake, daemon=True)
+                wake_thread.start()
+            except Exception as wake_err:
+                print(f'[snarling] Delayed wake setup failed (notification): {wake_err}')
+        except Exception as e:
+            print(f"[snarling] Notification callback failed: {e}")
+
+    def _notify_sort_key(self, item):
+        """Sort key for notification stack: high first, then normal, then low.
+        Within same priority, higher _seq (newer) comes first (LIFO)."""
+        rank = {'high': 0, 'normal': 1, 'low': 2}.get(item.get('priority', 'normal'), 1)
+        return (rank, -item.get('_seq', 0))
+
+    def _prepare_notify_banners(self, message, priority):
+        """Build the alternating banners for a notification and set them on self."""
+        try:
+            banner_header_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
+            )
+            banner_msg_font = ImageFont.truetype(
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
+            )
+        except OSError:
+            banner_header_font = ImageFont.load_default()
+            banner_msg_font = banner_header_font
+
+        def word_wrap(text, font, max_width):
+            """Word-wrap text to fit within max_width pixels using the given font."""
+            words = text.split()
+            lines = []
+            current = ""
+            for word in words:
+                test = f"{current} {word}".strip() if current else word
+                bbox = font.getbbox(test)
+                text_width = bbox[2] - bbox[0]
+                if text_width <= max_width:
+                    current = test
+                else:
+                    if current:
+                        lines.append(current)
+                    word_bbox = font.getbbox(word)
+                    word_width = word_bbox[2] - word_bbox[0]
+                    if word_width > max_width:
+                        current = word[:len(word)//2] + ".."
+                    else:
+                        current = word
+            if current:
+                lines.append(current)
+            return lines
+
+        # Banner 1: Priority header + short preview
+        priority_headers = {
+            'high': "!! HIGH",
+            'normal': "* MODERATE",
+            'low': "~ LOW",
+        }
+        header = priority_headers.get(priority, "* NOTIFICATION")
+        # Preview line: first ~25 chars of message, word-wrapped
+        preview_text = message[:25]
+        # If we cut in the middle of a word, truncate at last space
+        if len(message) > 25 and ' ' in preview_text:
+            preview_text = preview_text.rsplit(' ', 1)[0]
+        # Word-wrap preview with header font
+        preview_lines = word_wrap(preview_text, banner_header_font, max_width=280)
+        preview_line = preview_lines[0] if preview_lines else ""
+        banner1 = [header, preview_line]
+
+        # Banner 2: First 3 lines of the full message
+        msg_lines = word_wrap(message, banner_msg_font, max_width=280)
+        banner2_lines = msg_lines[:3]
+        # If there's more, truncate last line with "..."
+        if len(msg_lines) > 3:
+            banner2_lines = msg_lines[:3]
+            banner2_lines[2] = banner2_lines[2][:30] + "..."
+        while len(banner2_lines) < 3:
+            banner2_lines.append("")
+        banner2 = banner2_lines
+
+        # Banner 3: Continuation — lines 4+ of the full message
+        remaining_lines = msg_lines[3:] if len(msg_lines) > 3 else []
+        if remaining_lines:
+            banner3_lines = remaining_lines[:3]
+            # If still more, truncate last line with "..."
+            if len(remaining_lines) > 3:
+                banner3_lines = remaining_lines[:3]
+                banner3_lines[2] = banner3_lines[2][:30] + "..."
+            while len(banner3_lines) < 3:
+                banner3_lines.append("")
+            banner3 = banner3_lines
+        else:
+            # No continuation needed — skip banner 3 (empty)
+            banner3 = None
+
+        self._notify_banners = [b for b in [banner1, banner2, banner3] if b is not None]
+        self._notify_banner_index = 0
+        self._notify_banner_timer = 0
+        self._notify_banner_interval = 45  # ~1.5s at 30fps
+
+    def set_notification(self, message, priority='normal', notification_id=None, callback_url=None, session_key=None, secret=None, duration=None):
+        """Set state to notifying with message and priority.
+        If a notification is already active, queue this one in the stack.
+        The stack is priority-sorted (high > normal > low, LIFO within same priority).
+        If an approval is pending, just queue — don't interrupt."""
+        # Add to stack with a monotonically increasing sequence number
+        self._notify_seq += 1
+        item = {
+            "message": message, "priority": priority, "_seq": self._notify_seq,
+            "notification_id": notification_id, "callback_url": callback_url,
+            "session_key": session_key, "secret": secret,
+            "duration": duration if duration is not None else (300 if priority == 'low' else 0),
+            "sent_time": time.time()  # epoch when notification arrived at snarling
+        }
+        print(f"[snarling] set_notification: priority={priority}, duration_in={duration}, item_duration={item['duration']}")
+        self._notify_stack.append(item)
+        # Stable sort: primary key = priority rank (high=0, normal=1, low=2),
+        # secondary key = -_seq so newer items sort first within same priority
+        self._notify_stack.sort(key=self._notify_sort_key)
+
+        # Don't interrupt an active approval — notifications will show after it's resolved
+        if self.state == STATE_AWAITING_APPROVAL:
+            print(f"[snarling] Notification queued (approval pending): priority={priority}, stack_size={len(self._notify_stack)}")
+            return
+
+        # If already displaying a notification, check for priority bump
+        if self._notify_active and self.state == STATE_NOTIFYING:
+            priority_rank = {'high': 0, 'normal': 1, 'low': 2}
+            current_rank = priority_rank.get(self._notify_priority, 1)
+            new_rank = priority_rank.get(priority, 1)
+
+            if not self._notify_text_revealed and new_rank < current_rank:
+                # Bump current notification back to stack
+                self._notify_seq += 1
+                bumped = {
+                    "message": self._notify_message, "priority": self._notify_priority, "_seq": self._notify_seq,
+                    "notification_id": self._notify_id, "callback_url": self._notify_callback_url,
+                    "session_key": self._notify_session_key, "secret": self._notify_secret,
+                    "duration": self._notify_duration
+                }
+                self._notify_stack.append(bumped)
+                self._notify_stack.sort(key=self._notify_sort_key)
+                print(f"[snarling] Priority bump: '{priority}' replaces '{self._notify_priority}' on screen (text not revealed)")
+                # _activate_next_notification preserves _notify_pre_state (only sets it if state != NOTIFYING)
+                self._activate_next_notification()
+                return
+            else:
+                # Just queue, don't interrupt
+                print(f"[snarling] Notification queued: priority={priority}, stack_size={len(self._notify_stack)}, message='{message[:50]}'")
+                return
+
+        # No active notification — pop first from stack and display it
+        self._activate_next_notification()
+
+    def _activate_next_notification(self):
+        """Pop the first item from _notify_stack and make it the currently-displaying notification."""
+        if not self._notify_stack:
+            return
+        item = self._notify_stack.pop(0)  # remove from pending queue
+        message = item['message']
+        priority = item['priority']
+
+        # Save previous state so we can return to it after all notifications
+        if self.state != STATE_NOTIFYING:
+            self._notify_pre_state = self.state
+
+        self._notify_active = True
+        self._notify_priority = priority
+        self._notify_message = message
+        self._notify_start_time = time.time()
+        self._notify_text_revealed = False
+        # Store feedback metadata from stack item
+        self._notify_id = item.get('notification_id')
+        self._notify_callback_url = item.get('callback_url')
+        self._notify_session_key = item.get('session_key')
+        self._notify_secret = item.get('secret')
+        self._notify_duration = item.get('duration', 300) or 0  # 0 = no timeout (stays until dismissed)
+        self._notify_sent_time = item.get('sent_time', 0)  # when notification arrived at snarling
+
+        # Prepare banners
+        self._prepare_notify_banners(message, priority)
+
+        # Set state to notifying
+        self.state = STATE_NOTIFYING
+        # Reset face animation
+        self.face_index = 0
+        self.face_timer = 0
+        notify_faces = FaceExpressions.get_notify_faces(priority)
+        self.current_face = notify_faces[0] if notify_faces else "(•_•)"
+        # LED on until dismissed
+        self.led_timer = 216000  # effectively indefinite
+        total = 1 + len(self._notify_stack)
+        print(f"[snarling] Notification set: priority={priority}, message='{message[:50]}' ({1}/{total} in stack), notify_id={self._notify_id}")
+
+    def _dismiss_notification(self):
+        """Dismiss the current notification. If stack has items, show next; otherwise restore state."""
+        if not self._notify_active:
+            return
+
+        # If there are pending notifications in the stack, show the next one
+        if self._notify_stack:
+            item = self._notify_stack.pop(0)
+            message = item['message']
+            priority = item['priority']
+            # Update current notification attributes
+            self._notify_priority = priority
+            self._notify_message = message
+            self._notify_start_time = time.time()
+            self._notify_text_revealed = False
+            # Store feedback metadata from stack item
+            self._notify_id = item.get('notification_id')
+            self._notify_callback_url = item.get('callback_url')
+            self._notify_session_key = item.get('session_key')
+            self._notify_secret = item.get('secret')
+            self._notify_duration = item.get('duration', 300) or 0  # 0 = no timeout
+            self._notify_sent_time = item.get('sent_time', 0)  # when notification arrived at snarling
+            # Prepare banners for the new notification
+            self._prepare_notify_banners(message, priority)
+            # Reset face animation for new priority
+            self.face_index = 0
+            self.face_timer = 0
+            notify_faces = FaceExpressions.get_notify_faces(priority)
+            self.current_face = notify_faces[0] if notify_faces else "(•_•)"
+            total = 1 + len(self._notify_stack)
+            print(f"[snarling] Next notification from stack: priority={priority}, message='{message[:50]}' ({1}/{total} in stack)")
+            return
+
+        # Stack is empty — clear all notification state and restore pre-state
+        prev_state = self._notify_pre_state
+        self._notify_active = False
+        self._notify_priority = 'normal'
+        self._notify_message = ''
+        self._notify_text_revealed = False
+        self._notify_start_time = 0
+        self._notify_pre_state = STATE_SLEEPING
+        # Clean up notification feedback metadata
+        self._notify_id = None
+        self._notify_callback_url = None
+        self._notify_session_key = None
+        self._notify_secret = None
+        self._notify_duration = 0
+        # Clean up banner attributes
+        self._notify_banners = []
+        self._notify_banner_index = 0
+        self._notify_banner_timer = 0
+        self.state = prev_state
+        # Update face immediately to match restored state
+        faces = FaceExpressions.get_faces_for_state(prev_state)
+        if faces:
+            self.face_index = 0
+            self.current_face = faces[0]
+            self.face_timer = 0
+        # LED off when sleeping, else brief on
+        if prev_state == STATE_SLEEPING:
+            self.led_timer = 0
+        else:
+            self.led_timer = 5
+        print(f"[snarling] Notification dismissed, returning to {prev_state}")
+
     def set_awaiting_approval(self, request_id, message, flow_id=None, callback_secret=None, session_key=None):
         """Set state to awaiting approval with request details"""
         self.state = STATE_AWAITING_APPROVAL
@@ -558,8 +1284,11 @@ class snarlingCreature:
             desc_text = message
             print(f"[snarling] No ': ' found, full message as desc: '{message}'")
         # Word-wrap each line to fit within pixel width, breaking at word boundaries
-        # Banner text starts at x=10, display is 320px wide → usable = 310px
-        usable_width = 310
+        # Calculate usable width based on display dimensions and frame insets
+        inner_inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+        text_left = inner_inset + 10
+        text_right_calc = WIDTH - inner_inset - 30
+        usable_width = text_right_calc - text_left
         def word_wrap(text, font, max_width):
             """Word-wrap text to fit within max_width pixels using the given font."""
             words = text.split()
@@ -602,14 +1331,34 @@ class snarlingCreature:
         while len(action_lines) < 1:
             action_lines.append("")
         banner1 = [header, action_lines[0]]
-        # Banner 2: description word-wrapped across two lines
+        # Banner 2: first 3 lines of description word-wrapped
         desc_lines = word_wrap(desc_text, wrap_msg_font, max_width=usable_width)
-        while len(desc_lines) < 3:
-            desc_lines.append("")
-        banner2 = desc_lines[:3]
+        banner2_lines = desc_lines[:3]
+        if len(desc_lines) > 3:
+            banner2_lines = desc_lines[:3]
+            banner2_lines[2] = banner2_lines[2][:30] + "..."
+        while len(banner2_lines) < 3:
+            banner2_lines.append("")
+        banner2 = banner2_lines
+
+        # Banner 3: continuation — lines 4+ of description
+        remaining_lines = desc_lines[3:] if len(desc_lines) > 3 else []
+        if remaining_lines:
+            banner3_lines = remaining_lines[:3]
+            if len(remaining_lines) > 3:
+                banner3_lines = remaining_lines[:3]
+                banner3_lines[2] = banner3_lines[2][:30] + "..."
+            while len(banner3_lines) < 3:
+                banner3_lines.append("")
+            banner3 = banner3_lines
+        else:
+            banner3 = None
+
         print(f"[snarling] Banner1: {banner1}")
         print(f"[snarling] Banner2: {banner2}")
-        self._approval_banners = [banner1, banner2]
+        if banner3:
+            print(f"[snarling] Banner3: {banner3}")
+        self._approval_banners = [b for b in [banner1, banner2, banner3] if b is not None]
         self._approval_banner_index = 0
         self._approval_banner_timer = 0
         self._approval_banner_interval = 45  # frames per banner (~1.5s at 30fps)
@@ -637,11 +1386,26 @@ class snarlingCreature:
                     elif name == 'B':
                         self.reject_request()
                     # X and Y don't do anything in approval state
+                elif self.state == STATE_NOTIFYING and self._notify_active:
+                    # Notification interaction
+                    if name == 'A':
+                        if not self._notify_text_revealed:
+                            # Reveal notification text
+                            self._notify_text_revealed = True
+                            elapsed = time.time() - self._notify_start_time
+                            queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
+                            self.forward_notification_feedback(revealed=True, time_to_reveal_sec=elapsed, dismissed=False, time_in_queue_sec=queue_time)
+                            print(f"[snarling] Notification text revealed: {self._notify_message[:50]} (took {elapsed:.1f}s)")
+                        else:
+                            # Dismiss notification after text was revealed (feedback already sent on reveal)
+                            self._dismiss_notification()
+                    elif name == 'B':
+                        # Dismiss without revealing (snooze/dismiss)
+                        self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=True, time_in_queue_sec=self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0)
+                        self._dismiss_notification()
                 else:
                     # Normal button handling
-                    if name == 'A':
-                        self.show_status_summary()
-                    elif name == 'B':
+                    if name == 'B':
                         self.trigger_heartbeat()
                     elif name == 'X':
                         self.toggle_sleep_mode()
@@ -667,6 +1431,19 @@ class snarlingCreature:
         # Update LED
         self.update_led()
 
+        # Check notification timeout (only low-priority notifications auto-dismiss)
+        # High and normal priority stay until the user interacts
+        # duration=0 means "use priority-based default" (low=300s, others=no timeout)
+        effective_duration = self._notify_duration if self._notify_duration > 0 else (300 if self._notify_priority == 'low' else 0)
+        if self._notify_active and self.state == STATE_NOTIFYING and self._notify_start_time > 0:
+            if self._notify_priority == 'low' and effective_duration > 0:
+                elapsed_notify = time.time() - self._notify_start_time
+                if elapsed_notify >= effective_duration:
+                    print(f"[snarling] Low-priority notification timed out after {effective_duration}s")
+                    queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
+                    self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True, time_in_queue_sec=queue_time)
+                    self._dismiss_notification()
+
         # Decrement status timer every frame (even when screen is asleep)
         if self.status_timer > 0:
             self.status_timer -= 1
@@ -682,7 +1459,7 @@ class snarlingCreature:
                 self.led_timer = 0
 
     def draw_frame(self):
-        """Render the frame"""
+        """Render the frame using the new design system"""
         # Check if screen is asleep (but allow status messages to show)
         if self.screen_asleep:
             # Render black screen when asleep
@@ -690,47 +1467,62 @@ class snarlingCreature:
             
             # Only show status messages even in sleep mode
             if self.status_timer > 0:
-                # Semi-transparent background (2x taller, grows upward)
-                overlay_bottom = HEIGHT - 30
-                overlay_top = overlay_bottom - 60
-                overlay_left = 5
-                overlay_right = WIDTH - 20
-                self.draw.rectangle((0, overlay_top, overlay_right, overlay_bottom), fill=(40, 50, 60))
+                inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
+                banner_top = HEIGHT - inset - BANNER_HEIGHT + 4
+                banner_bottom = HEIGHT - inset - 4
+                text_left = inset + 10
+                text_right = WIDTH - inset - 30
+                max_text_width = text_right - text_left
+                # Show in the banner area
+                self.draw.rectangle(
+                    (inset + 1, banner_top - 4, WIDTH - inset - 1, banner_bottom),
+                    fill=COLOR_BANNER_BG
+                )
                 try:
                     status_font = ImageFont.truetype(
                         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
                     )
                 except OSError:
                     status_font = ImageFont.load_default()
-                # Word-wrap text within the box
-                max_width = overlay_right - overlay_left - 5
                 words = self.status_message.split(' ')
                 lines = []
                 current_line = ''
                 for word in words:
                     test_line = f'{current_line} {word}'.strip() if current_line else word
                     bbox = status_font.getbbox(test_line)
-                    if bbox[2] - bbox[0] > max_width and current_line:
+                    if bbox[2] - bbox[0] > max_text_width and current_line:
                         lines.append(current_line)
                         current_line = word
                     else:
                         current_line = test_line
                 if current_line:
                     lines.append(current_line)
-                y = overlay_top + 5
+                y = banner_top
                 for line in lines:
-                    if y + 24 > overlay_bottom:
+                    if y + 24 > banner_bottom:
                         break
-                    self.draw.text((overlay_left, y), line, fill=(255, 255, 255), font=status_font)
+                    self.draw.text((text_left, y), line, fill=(255, 255, 255), font=status_font)
                     y += 24
             return
         
-        # Normal rendering when awake
-        # Clear background
-        self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=COLOR_BG)
-
-        # Draw elements
+        # Normal rendering when awake — new design system
+        # 1. Background
+        self.draw_background()
+        # 2. Outer border (mood ring)
+        self.draw_outer_border()
+        # 3. Inner frame
+        self.draw_inner_frame()
+        # 4. Button indicators
+        self.draw_button_indicators()
+        # 5. Status boxes
+        self.draw_status_boxes()
+        # 6. Face
         self.draw_face()
+        # 7. Separator + banner background (conditional)
+        if self._is_banner_active():
+            self.draw_separator()
+            self.draw_banner_background()
+        # 8. Banner text
         self.draw_status()
 
     def render(self):
@@ -811,13 +1603,34 @@ creature_instance = None  # Will hold reference to snarlingCreature instance
 if FLASK_AVAILABLE and approval_app:
     @approval_app.route('/approval/alert', methods=['POST'])
     def approval_alert():
-        """Receive approval alert from approval server"""
+        """Receive approval alert or notification from approval server"""
         global creature_instance
         data = request.json
         
         if not data:
             return jsonify({"error": "No JSON data"}), 400
         
+        # Check if this is a notification (vs an approval request)
+        if data.get('type') == 'notification':
+            message = data.get('message', '')
+            priority = data.get('priority', 'normal')
+            # Validate secret (same auth as approvals)
+            secret = data.get('secret')
+            if not secret:
+                return jsonify({"error": "Missing secret"}), 401
+            # Extract new feedback fields
+            notification_id = data.get('notification_id')
+            callback_url = data.get('callback_url')
+            session_key = data.get('sessionKey')
+            duration = data.get('duration', 300)
+            if creature_instance:
+                creature_instance.set_notification(message, priority=priority, notification_id=notification_id, callback_url=callback_url, session_key=session_key, secret=secret, duration=duration)
+                print(f"[snarling] Received notification: priority={priority}, notify_id={notification_id}")
+                return jsonify({"status": "notification_displayed"})
+            else:
+                return jsonify({"error": "snarling not initialized"}), 503
+        
+        # Original approval flow
         request_id = data.get('request_id')
         message = data.get('message', 'Approval required')
         flow_id = data.get('flow_id')  # OpenClaw TaskFlow ID
@@ -831,6 +1644,32 @@ if FLASK_AVAILABLE and approval_app:
         else:
             return jsonify({"error": "snarling not initialized"}), 503
     
+    @approval_app.route('/debug/notifications', methods=['GET'])
+    def debug_notifications():
+        """Debug endpoint to check current notification state"""
+        global creature_instance
+        if not creature_instance:
+            return jsonify({"error": "snarling not initialized"}), 503
+
+        return jsonify({
+            "active": creature_instance._notify_active,
+            "state": creature_instance.state,
+            "current_priority": creature_instance._notify_priority,
+            "current_message": creature_instance._notify_message[:80] if creature_instance._notify_message else "",
+            "text_revealed": creature_instance._notify_text_revealed,
+            "notification_id": creature_instance._notify_id,
+            "callback_url": creature_instance._notify_callback_url,
+            "duration": creature_instance._notify_duration,
+            "start_time": creature_instance._notify_start_time,
+            "sent_time": creature_instance._notify_sent_time,
+            "stack_size": len(creature_instance._notify_stack),
+            "stack": [
+                {"priority": item["priority"], "message": item["message"][:50], "seq": item.get("_seq", 0),
+                 "notification_id": item.get("notification_id"), "callback_url": item.get("callback_url")}
+                for item in creature_instance._notify_stack
+            ]
+        })
+
     @approval_app.route('/health', methods=['GET'])
     def approval_health():
         """Health check for approval server"""
@@ -865,12 +1704,17 @@ if FLASK_AVAILABLE and approval_app:
             # Don't override awaiting_approval state unless explicitly setting it
             if creature_instance.state == STATE_AWAITING_APPROVAL and state != STATE_AWAITING_APPROVAL:
                 return jsonify({"status": "ignored", "reason": "awaiting_approval"})
+            # During notification, store incoming state as the pre-state so it applies after dismiss
+            if creature_instance.state == STATE_NOTIFYING and creature_instance._notify_active and state != STATE_NOTIFYING:
+                creature_instance._notify_pre_state = state
+                print(f"[snarling] State update queued for after notification: {state}")
+                return jsonify({"status": "queued", "reason": "notifying", "pending_state": state})
 
             if state != creature_instance.state:
                 old_state = creature_instance.state
                 creature_instance.state = state
                 # Update face immediately on state change
-                faces = FaceExpressions.get_faces_for_state(state)
+                faces = FaceExpressions.get_faces_for_state(state, getattr(creature_instance, '_notify_priority', None))
                 if faces:
                     creature_instance.face_index = 0
                     creature_instance.current_face = faces[0]
