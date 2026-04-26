@@ -13,6 +13,13 @@ import logging
 import threading
 import time
 
+# Configure logging so thermal.py messages are visible
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S',
+)
+
 logger = logging.getLogger("snarling.thermal")
 
 # ── Detection tuning ──────────────────────────────────────────────────
@@ -214,20 +221,40 @@ class ThermalSensor:
         """Read thermal frames and update presence state."""
         # Pre-allocate the frame buffer once (768 floats)
         frame = [0.0] * 768
+        consecutive_errors = 0
 
         while not self._stop_event.is_set():
             try:
-                self._mlx.getFrame(frame)
-            except Exception as exc:
-                logger.warning("MLX90640 read error: %s — backing off %ss",
-                                exc, ERROR_BACKOFF)
-                with self._lock:
-                    self._sensor_ready = False
-                self._stop_event.wait(ERROR_BACKOFF)
-                continue
+                try:
+                    self._mlx.getFrame(frame)
+                except Exception as exc:
+                    logger.warning("MLX90640 read error: %s — backing off %ss",
+                                    exc, ERROR_BACKOFF)
+                    with self._lock:
+                        self._sensor_ready = False
+                    self._stop_event.wait(ERROR_BACKOFF)
+                    continue
 
-            now = time.time()
-            self._process_frame(frame, now)
+                try:
+                    now = time.time()
+                    self._process_frame(frame, now)
+                    consecutive_errors = 0
+                except Exception as exc:
+                    consecutive_errors += 1
+                    logger.error("Thermal frame processing error (#%d): %s", consecutive_errors, exc, exc_info=True)
+                    if consecutive_errors >= 10:
+                        logger.error("Too many consecutive processing errors — stopping thermal thread")
+                        with self._lock:
+                            self._sensor_ready = False
+                        return
+                    # Back off briefly before retrying
+                    self._stop_event.wait(1.0)
+                    continue
+
+            except Exception as exc:
+                # Catch-all for anything unexpected — don't let the thread die silently
+                logger.error("Unexpected error in thermal reader loop: %s", exc, exc_info=True)
+                self._stop_event.wait(ERROR_BACKOFF)
 
             # Sleep until next frame (aim for ~2 Hz)
             self._stop_event.wait(READ_INTERVAL)

@@ -1836,7 +1836,11 @@ class snarlingCreature:
         if self._thermal_available and self.thermal is not None:
             try:
                 self.thermal.start()
-                print("[snarling] Thermal sensor started")
+                if self.thermal.is_running:
+                    print("[snarling] Thermal sensor started")
+                else:
+                    print("[snarling] Thermal sensor failed to start — sensor unavailable")
+                    self._thermal_available = False
             except Exception as e:
                 print(f"[snarling] Thermal sensor start failed: {e}")
                 self._thermal_available = False
