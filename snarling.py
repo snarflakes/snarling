@@ -103,8 +103,9 @@ class FaceExpressions:
     NOTIFY_LOW = ['(◠‿◠)']
 
     # Proximity-aware faces (used when sleeping + someone detected)
-    PROXIMITY_APPROACHING = ['(⊙◡⊙)']  # Eyes widening — awareness
-    PROXIMITY_PRESENT = ['(◠‿◠)']        # Warm recognition — engagement
+    PROXIMITY_APPROACHING = ['(⊙◡⊙)', '(☉.☉)']  # Eyes widening — awareness, slight rotation
+    PROXIMITY_PRESENT = ['(◠‿◠)', '(◕‿◕)', '(◐‿◐)']  # Warm → eager → awkward — raw presence cycle
+    GRATEFUL = ['(^‿‿^)']              # Joyful appreciation
     LEAVING = ['(◡‿◡)']                  # Brief "goodbye" face when someone walks away
 
     @classmethod
@@ -462,10 +463,15 @@ class snarlingCreature:
         # Override current face with leaving face if active (instant, not waiting for timer)
         if self._leaving_face_active:
             self.current_face = FaceExpressions.LEAVING[0]
-        # Override with pending proximity face if it's time
+        # Override with pending proximity face if it's time (only when someone is present or approaching)
         elif self._proximity_face_pending is None and self._thermal_available and self.state == STATE_SLEEPING:
-            # Use the current proximity face directly
-            self.current_face = self._proximity_face_current
+            try:
+                with self._environmental_lock:
+                    zone = self._environmental_state["proximity_zone"]
+            except Exception:
+                zone = "absent"
+            # Proximity face cycling is handled by the face list rotation above;
+            # no static override needed for any zone
 
         # Update animation offsets based on state
         if self.state == STATE_SLEEPING:
@@ -1093,7 +1099,7 @@ class snarlingCreature:
             import requests as req_lib
             # Call OpenClaw's approval-callback webhook
             gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
-            webhook_url = f"http://localhost:18789/approval-callback?sessionKey={session_key}"
+            webhook_url = "http://localhost:18789/approval-callback"
             response_data = {
                 "request_id": request_id,
                 "approved": approved,

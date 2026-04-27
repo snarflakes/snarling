@@ -24,7 +24,7 @@ logger = logging.getLogger("snarling.thermal")
 
 # ── Detection tuning ──────────────────────────────────────────────────
 PERSON_DELTA = 3.0        # °C above ambient to count as "warm"
-MIN_PERSON_PIXELS = 6     # minimum blob size to qualify as a person
+MIN_PERSON_PIXELS = 26    # minimum blob size to qualify as a person (filters false positives, keeps approach responsive)
 DEBOUNCE_FRAMES = 3       # consecutive frames required to confirm state change
 READ_INTERVAL = 0.5       # seconds between frames (~2 Hz)
 ERROR_BACKOFF = 5.0       # seconds to wait after a read error
