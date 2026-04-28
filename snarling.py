@@ -350,23 +350,23 @@ class snarlingCreature:
                 base_r = min(1.0, base_r + warmth_mix * 0.5)   # warm red
                 base_g = min(1.0, base_g + warmth_mix * 0.15)  # tiny green
 
-            self.display.set_led(base_r, base_g, base_b)
+            self.display.set_led(min(1.0, max(0.0, base_r)), min(1.0, max(0.0, base_g)), min(1.0, max(0.0, base_b)))
 
         elif self._thermal_available and env_present:
             # Sleeping (no state LED timer) + person present: proximity drives LED fully
             pulse = 0.3 + 0.4 * math.sin(self.breath_phase * 0.8) * env_proximity
             warmth = env_proximity
             self.display.set_led(
-                pulse * warmth * 0.8,
-                pulse * 0.3,
-                pulse * (1 - warmth) * 0.5
+                min(1.0, max(0.0, pulse * warmth * 0.8)),
+                min(1.0, max(0.0, pulse * 0.3)),
+                min(1.0, max(0.0, pulse * (1 - warmth) * 0.5))
             )
         elif self.led_timer <= 0:
             # No state LED timer and no proximity — gentle breathing or off
             if self.state == STATE_SLEEPING:
                 brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
                 brightness *= 0.7
-                self.display.set_led(0, brightness * 0.25, brightness * 0.5)
+                self.display.set_led(0, min(1.0, max(0.0, brightness * 0.25)), min(1.0, max(0.0, brightness * 0.5)))
             else:
                 self.display.set_led(0, 0, 0)
 
@@ -973,8 +973,8 @@ class snarlingCreature:
 
     # ── Thermal sensor callbacks ────────────────────────────────────
 
-    def _on_thermal_presence_change(self, absent, present):
-        """Called by ThermalSensor when someone appears or disappears.
+    def _on_thermal_presence_change(self, absent, present, ambient_temp=None):
+        """Callback from thermal sensor when presence state changes.
         Runs in the thermal sensor's thread — must be thread-safe."""
         now = time.time()
 
@@ -988,6 +988,7 @@ class snarlingCreature:
         with self._environmental_lock:
             self._environmental_state["present"] = present
             self._environmental_state["last_change"] = now
+            self._environmental_state["ambient_temp"] = ambient_temp
             if present:
                 self._environmental_state["proximity_zone"] = "approaching"
                 self._environmental_state["proximity"] = max(self._environmental_state["proximity"], 0.3)
@@ -1015,7 +1016,7 @@ class snarlingCreature:
 
         print(f"[snarling] Presence change: absent={absent}, present={present}")
 
-    def _on_thermal_proximity_change(self, old_zone, new_zone, proximity):
+    def _on_thermal_proximity_change(self, old_zone, new_zone, proximity, ambient_temp=None):
         """Called by ThermalSensor when proximity zone changes.
         Runs in the thermal sensor's thread — must be thread-safe."""
         now = time.time()
@@ -1024,11 +1025,12 @@ class snarlingCreature:
             self._environmental_state["proximity_zone"] = new_zone
             self._environmental_state["last_change"] = now
             self._environmental_state["source"] = "thermal"
+            self._environmental_state["ambient_temp"] = ambient_temp
 
         # Brightness targets based on proximity zone
         if new_zone == "present":
             # Close range — full brightness with slight overshoot for "lock-on"
-            self._brightness_target = 1.05  # Overshoot, settles to 1.0
+            self._brightness_target = 1.0  # Full brightness on close proximity
             self._proximity_face_pending = "(◠‿◠)"  # I see you
             self._proximity_face_time = now + 0.20  # 200ms after detection
             self._brightness_ramp_start = now
@@ -2030,13 +2032,19 @@ if FLASK_AVAILABLE and approval_app:
         with creature_instance._environmental_lock:
             env = dict(creature_instance._environmental_state)
 
+        # Supplement with live thermal sensor values (updated every frame)
+        ambient = env.get("ambient_temp")
+        if creature_instance.thermal and creature_instance._thermal_available:
+            sensor_info = creature_instance.thermal.get_presence_info()
+            ambient = sensor_info.get("ambient_temp", ambient)
+
         return jsonify({
             "present": env["present"],
             "proximity": round(env["proximity"], 3),
             "proximity_zone": env["proximity_zone"],
             "source": env["source"],
             "last_change": env["last_change"],
-            "ambient_temp": env["ambient_temp"],
+            "ambient_temp": round(ambient, 1) if ambient is not None else None,
             "thermal_available": creature_instance._thermal_available,
         })
 

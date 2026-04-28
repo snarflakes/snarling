@@ -24,7 +24,9 @@ logger = logging.getLogger("snarling.thermal")
 
 # ── Detection tuning ──────────────────────────────────────────────────
 PERSON_DELTA = 3.0        # °C above ambient to count as "warm"
-MIN_PERSON_PIXELS = 26    # minimum blob size to qualify as a person (filters false positives, keeps approach responsive)
+MIN_PERSON_PIXELS = 15    # minimum blob size to qualify as a person
+MIN_BLOB_ASPECT = 0.25    # minimum width/height ratio (rejects tall narrow edge artifacts)
+EDGE_MARGIN = 2           # ignore outermost N rows/columns (MLX90640 edge artifacts)
 DEBOUNCE_FRAMES = 3       # consecutive frames required to confirm state change
 READ_INTERVAL = 0.5       # seconds between frames (~2 Hz)
 ERROR_BACKOFF = 5.0       # seconds to wait after a read error
@@ -93,9 +95,9 @@ class ThermalSensor:
     def __init__(self, on_presence_change=None, on_proximity_change=None):
         """
         Args:
-            on_presence_change: callback(was_absent: bool, now_present: bool)
+            on_presence_change: callback(was_absent: bool, now_present: bool, ambient_temp: float)
                 called when presence state changes
-            on_proximity_change: callback(old_zone: str, new_zone: str, proximity: float)
+            on_proximity_change: callback(old_zone: str, new_zone: str, proximity: float, ambient_temp: float)
                 called when proximity zone changes
         """
         self._on_presence_change = on_presence_change
@@ -265,23 +267,24 @@ class ThermalSensor:
         """Analyse one thermal frame and update shared state."""
         ROWS, COLS = 24, 32
 
-        # 1. Compute ambient from top-left 4×4 corner block
-        ambient_sum = 0.0
-        ambient_count = 0
-        for r in range(4):
-            for c in range(4):
-                ambient_sum += frame[r * COLS + c]
-                ambient_count += 1
-        ambient = ambient_sum / ambient_count
+        # 1. Compute ambient using median of interior pixels (robust to edge
+        #    artifacts and warm blobs). Edge margin pixels are excluded.
+        interior_temps = []
+        for r in range(EDGE_MARGIN, ROWS - EDGE_MARGIN):
+            row_offset = r * COLS
+            for c in range(EDGE_MARGIN, COLS - EDGE_MARGIN):
+                interior_temps.append(frame[row_offset + c])
+        interior_temps.sort()
+        ambient = interior_temps[len(interior_temps) // 2]  # median
 
         # 2. Threshold
         threshold = ambient + PERSON_DELTA
 
-        # 3. Binary mask
+        # 3. Binary mask — exclude edge pixels to avoid MLX90640 artifacts
         mask = [[False] * COLS for _ in range(ROWS)]
-        for r in range(ROWS):
+        for r in range(EDGE_MARGIN, ROWS - EDGE_MARGIN):
             row_offset = r * COLS
-            for c in range(COLS):
+            for c in range(EDGE_MARGIN, COLS - EDGE_MARGIN):
                 if frame[row_offset + c] > threshold:
                     mask[r][c] = True
 
@@ -294,16 +297,20 @@ class ThermalSensor:
 
         for blob in blobs:
             size = len(blob)
-            if size < MIN_PERSON_PIXELS:
-                continue
-
-            # Bounding box and aspect ratio check
             min_r, min_c, max_r, max_c = _blob_bounds(blob)
             height = max_r - min_r + 1
             width = max_c - min_c + 1
 
-            # Person is roughly vertical: height >= width, or at most
-            # width:height up to 2:1 (e.g. seated person)
+            # Size check
+            if size < MIN_PERSON_PIXELS:
+                continue  # too small, skip
+
+            # Aspect ratio checks
+            if width == 0 or height == 0:
+                continue  # degenerate blob
+            aspect = width / height
+            if aspect < MIN_BLOB_ASPECT:
+                continue  # too narrow (tall thin strip — edge artifact)
             if width > height and width > height * 2:
                 continue  # too horizontal, skip
 
@@ -311,9 +318,11 @@ class ThermalSensor:
             avg_temp = sum(frame[r * COLS + c] for r, c in blob) / size
 
             # Proximity score: bigger + hotter = closer
-            # Normalise size relative to a reasonable "close person" (say ~100 pixels)
-            size_factor = min(size / 100.0, 1.0)
-            temp_factor = min((avg_temp - ambient) / 15.0, 1.0)  # 15°C above ambient = max
+            # size/40: a person at 3ft is ~55-65 pixels → size_factor ≈ 1.0
+            # temp/5: a person at 3ft is ~4°C above ambient → temp_factor ≈ 0.8
+            # Result: normal distance scores ~0.85-0.92 → solid "present"
+            size_factor = min(size / 40.0, 1.0)
+            temp_factor = min((avg_temp - ambient) / 5.0, 1.0)
             score = 0.5 * size_factor + 0.5 * max(temp_factor, 0.0)
 
             if score > best_score:
@@ -325,6 +334,9 @@ class ThermalSensor:
                     "width": width,
                     "score": score,
                 }
+
+
+
 
         # 6. Determine raw presence and proximity
         if best_person is not None:
@@ -397,13 +409,13 @@ class ThermalSensor:
         # Fire callbacks outside the lock
         if fire_presence and self._on_presence_change:
             try:
-                self._on_presence_change(not new_present, new_present)
+                self._on_presence_change(not new_present, new_present, ambient)
             except Exception:
                 logger.debug("presence_change callback error", exc_info=True)
 
         if fire_proximity and self._on_proximity_change and old_zone is not None:
             try:
-                self._on_proximity_change(old_zone, new_zone, self.proximity)
+                self._on_proximity_change(old_zone, new_zone, self.proximity, ambient)
             except Exception:
                 logger.debug("proximity_change callback error", exc_info=True)
 
