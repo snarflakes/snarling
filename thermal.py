@@ -33,8 +33,8 @@ ERROR_BACKOFF = 5.0       # seconds to wait after a read error
 
 # Proximity zone thresholds
 ZONE_ABSENT = "absent"         # proximity == 0.0
-ZONE_APPROACHING = "approaching"  # 0.3 <= proximity < 0.6
-ZONE_PRESENT = "present"       # proximity >= 0.6
+ZONE_APPROACHING = "approaching"  # 0.3 <= proximity < 0.65
+ZONE_PRESENT = "present"       # proximity >= 0.65
 
 # ── Pure-Python connected-component labelling (flood fill) ───────────
 
@@ -425,7 +425,7 @@ class ThermalSensor:
 def _proximity_to_zone(proximity: float) -> str:
     if proximity <= 0.0:
         return ZONE_ABSENT
-    elif proximity < 0.6:
+    elif proximity < 0.65:
         return ZONE_APPROACHING
     else:
         return ZONE_PRESENT
