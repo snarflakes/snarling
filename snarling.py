@@ -1037,8 +1037,8 @@ class snarlingCreature:
             self._environmental_state["source"] = "thermal"
             self._environmental_state["ambient_temp"] = ambient_temp
 
-        # Force immediate face update when proximity changes
-        self.face_timer = 2.01  # Reset to trigger face change on next render
+        # Force immediate face update when proximity changes (small delay for smoothness)
+        self.face_timer = 0.5  # Slight delay prevents jerkiness
 
         # Brightness targets based on proximity zone
         if new_zone == "present":
