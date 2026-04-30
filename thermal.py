@@ -28,7 +28,7 @@ MIN_PERSON_PIXELS = 15    # minimum blob size to qualify as a person
 MIN_BLOB_ASPECT = 0.25    # minimum width/height ratio (rejects tall narrow edge artifacts)
 EDGE_MARGIN = 2           # ignore outermost N rows/columns (MLX90640 edge artifacts)
 DEBOUNCE_FRAMES = 2       # consecutive frames required to confirm state change
-READ_INTERVAL = 0.5       # seconds between frames (~2 Hz)
+READ_INTERVAL = 0.25       # seconds between frames (~4 Hz)
 ERROR_BACKOFF = 5.0       # seconds to wait after a read error
 
 # Proximity zone thresholds
@@ -206,7 +206,7 @@ class ThermalSensor:
         try:
             i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
             self._mlx = MLX90640(i2c, address=0x33)
-            self._mlx.refresh_rate = RefreshRate.REFRESH_2_HZ
+            self._mlx.refresh_rate = RefreshRate.REFRESH_4_HZ
             # Do a throwaway read to confirm the sensor responds
             frame = [0.0] * 768
             self._mlx.getFrame(frame)
