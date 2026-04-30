@@ -310,8 +310,8 @@ class snarlingCreature:
 
         # Determine base LED color from state
         if self.led_timer > 0 or self.state in (STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_AWAITING_APPROVAL, STATE_NOTIFYING):
-            # Clear presence glow block when state changes
-            self._led_block_presence_glow = False
+            # Only clear presence glow block when actually leaving (proximity drops), not on state change
+            # (block will clear naturally when env_present goes false in the presence callback)
             # State-driven LED colors
             if self.state == STATE_SLEEPING:
                 brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
@@ -1022,6 +1022,8 @@ class snarlingCreature:
             self._brightness_target = 0.2
             self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.9  # Slower fade-out
+            # Clear the LED block so next presence starts fresh
+            self._led_block_presence_glow = False
 
         print(f"[snarling] Presence change: absent={absent}, present={present}")
 
