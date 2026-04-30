@@ -220,12 +220,6 @@ class snarlingCreature:
         self._proximity_face_time = 0
         self._proximity_face_current = "(≖◡◡≖)"
 
-        # LED hysteresis: require stable presence before LED turns on
-        # Prevents LED flickering when proximity bounces near thresholds
-        self._led_present_counter = 0    # consecutive frames with presence
-        self._led_absent_counter = 0     # consecutive frames without presence
-        self._led_confirmed_present = False  # LED only uses presence after stable
-
         # Walking away face
         self._leaving_face_active = False
         self._leaving_face_timer = 0.0
@@ -299,24 +293,6 @@ class snarlingCreature:
             env_present = False
             env_proximity = 0.0
 
-        # LED hysteresis: require stable presence for a few frames before reacting
-        # This prevents LED flickering when proximity bounces near thresholds
-        LED_HYSTERESIS_FRAMES = 3  # frames to confirm presence/absence
-
-        if env_present:
-            self._led_present_counter += 1
-            self._led_absent_counter = 0
-            if self._led_present_counter >= LED_HYSTERESIS_FRAMES:
-                self._led_confirmed_present = True
-        else:
-            self._led_absent_counter += 1
-            self._led_present_counter = 0
-            if self._led_absent_counter >= LED_HYSTERESIS_FRAMES:
-                self._led_confirmed_present = False
-
-        # Use confirmed presence for LED decisions (with proximity value)
-        led_present = self._led_confirmed_present and env_proximity > 0.1
-
         # Calculate proximity brightness using exponential smoothing
         frame_dt = 1.0 / 30.0  # ~30fps
         alpha = 1 - math.exp(-frame_dt / 0.23)  # ~0.7s time constant
@@ -369,14 +345,14 @@ class snarlingCreature:
 
             # Composite: add a warm proximity glow on top of the state LED
             # Makes even processing/communicating feel slightly different when you're nearby
-            if self._thermal_available and led_present and env_proximity > 0.1:
+            if self._thermal_available and env_present and env_proximity > 0.1:
                 warmth_mix = env_proximity * 0.3  # subtle — 30% max mix
                 base_r = min(1.0, base_r + warmth_mix * 0.5)   # warm red
                 base_g = min(1.0, base_g + warmth_mix * 0.15)  # tiny green
 
             self.display.set_led(min(1.0, max(0.0, base_r)), min(1.0, max(0.0, base_g)), min(1.0, max(0.0, base_b)))
 
-        elif self._thermal_available and led_present:
+        elif self._thermal_available and env_present:
             # Sleeping (no state LED timer) + person present: proximity drives LED fully
             pulse = 0.3 + 0.4 * math.sin(self.breath_phase * 0.8) * env_proximity
             warmth = env_proximity
