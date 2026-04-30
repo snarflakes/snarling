@@ -420,6 +420,8 @@ class snarlingCreature:
         if self._proximity_face_pending and now >= self._proximity_face_time:
             self._proximity_face_current = self._proximity_face_pending
             self._proximity_face_pending = None
+            # Turn off LED when presence face appears — LED only comes back on with state transition
+            self.display.set_led(0, 0, 0)
 
         if self.face_timer > 2.0:  # Change face every 2 seconds for more variety
             # Leaving face overrides everything (brief goodbye)
