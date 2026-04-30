@@ -148,10 +148,17 @@ cd snarling
 # Install dependencies
 pip install flask pillow requests websocket-client
 
-# Snarling is managed by myscript — auto-restarts on crash/kill
-# To run manually for testing:
+# Copy the systemd service file to enable auto-start
+sudo cp snarling.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable snarling.service
+# To start now: sudo systemctl start snarling.service
+
+# To run manually for testing (Ctrl+C to stop):
 python snarling.py
 ```
+
+The service file handles auto-restart on crash/kill.
 
 ### 2. Install the Interaction Bridge Plugin
 
