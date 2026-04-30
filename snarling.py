@@ -371,8 +371,8 @@ class snarlingCreature:
             # No state LED timer and no proximity — gentle breathing or off
             if self.state == STATE_SLEEPING:
                 brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
-                brightness *= 0.7
-                self.display.set_led(0, min(1.0, max(0.0, brightness * 0.25)), min(1.0, max(0.0, brightness * 0.5)))
+                brightness *= 1.0  # increased from 0.7 for steadier LED
+                self.display.set_led(0, min(1.0, max(0.0, brightness * 0.4)), min(1.0, max(0.0, brightness * 0.8)))
             else:
                 self.display.set_led(0, 0, 0)
 
