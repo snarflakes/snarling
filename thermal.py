@@ -27,7 +27,7 @@ PERSON_DELTA = 3.0        # °C above ambient to count as "warm"
 MIN_PERSON_PIXELS = 15    # minimum blob size to qualify as a person
 MIN_BLOB_ASPECT = 0.25    # minimum width/height ratio (rejects tall narrow edge artifacts)
 EDGE_MARGIN = 2           # ignore outermost N rows/columns (MLX90640 edge artifacts)
-DEBOUNCE_FRAMES = 3       # consecutive frames required to confirm state change
+DEBOUNCE_FRAMES = 2       # consecutive frames required to confirm state change
 READ_INTERVAL = 0.5       # seconds between frames (~2 Hz)
 ERROR_BACKOFF = 5.0       # seconds to wait after a read error
 
