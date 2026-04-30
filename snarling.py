@@ -1007,13 +1007,12 @@ class snarlingCreature:
             self._environmental_state["source"] = "thermal"
 
         if present:
-            # Person appeared — schedule face/brightness transition
-            # 150ms delay before reacting (feels like perception, not a sensor)
+            # Person appeared — instant reaction (no perceptual delay)
             self._proximity_face_pending = "(⊙◡⊙)"  # Awareness: eyes widening
-            self._proximity_face_time = now + 0.15
+            self._proximity_face_time = now
             # Start brightness ramp toward "approaching" level
             self._brightness_target = 0.5
-            self._brightness_ramp_start = now + 0.15  # Delay matches face
+            self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.7
         else:
             # Person disappeared — dim down immediately (no perceptual delay on leaving)
@@ -1043,14 +1042,14 @@ class snarlingCreature:
             # Close range — full brightness with slight overshoot for "lock-on"
             self._brightness_target = 1.0  # Full brightness on close proximity
             self._proximity_face_pending = "(◠‿◠)"  # I see you
-            self._proximity_face_time = now + 0.20  # 200ms after detection
+            self._proximity_face_time = now  # instant
             self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.7
         elif new_zone == "approaching":
             # Mid range — partial brightness
             self._brightness_target = 0.3 + proximity * 0.7
             self._proximity_face_pending = "(⊙◡⊙)"  # Awareness
-            self._proximity_face_time = now + 0.15
+            self._proximity_face_time = now  # instant
             self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.7
         else:
