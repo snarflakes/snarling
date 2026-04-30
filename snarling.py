@@ -220,6 +220,9 @@ class snarlingCreature:
         self._proximity_face_time = 0
         self._proximity_face_current = "(≖◡◡≖)"
 
+        # Block LED proximity glow briefly after presence face appears
+        self._led_block_presence_glow = False
+
         # Walking away face
         self._leaving_face_active = False
         self._leaving_face_timer = 0.0
@@ -307,6 +310,8 @@ class snarlingCreature:
 
         # Determine base LED color from state
         if self.led_timer > 0 or self.state in (STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_AWAITING_APPROVAL, STATE_NOTIFYING):
+            # Clear presence glow block when state changes
+            self._led_block_presence_glow = False
             # State-driven LED colors
             if self.state == STATE_SLEEPING:
                 brightness = 0.3 + 0.2 * math.sin(self.breath_phase)
@@ -352,8 +357,9 @@ class snarlingCreature:
 
             self.display.set_led(min(1.0, max(0.0, base_r)), min(1.0, max(0.0, base_g)), min(1.0, max(0.0, base_b)))
 
-        elif self._thermal_available and env_present:
+        elif self._thermal_available and env_present and not self._led_block_presence_glow:
             # Sleeping (no state LED timer) + person present: proximity drives LED fully
+            # Blocked briefly after presence face appears to prevent flickering
             pulse = 0.3 + 0.4 * math.sin(self.breath_phase * 0.8) * env_proximity
             warmth = env_proximity
             self.display.set_led(
@@ -420,8 +426,9 @@ class snarlingCreature:
         if self._proximity_face_pending and now >= self._proximity_face_time:
             self._proximity_face_current = self._proximity_face_pending
             self._proximity_face_pending = None
-            # Turn off LED when presence face appears — LED only comes back on with state transition
+            # Turn off LED and block proximity glow briefly
             self.display.set_led(0, 0, 0)
+            self._led_block_presence_glow = True
 
         if self.face_timer > 2.0:  # Change face every 2 seconds for more variety
             # Leaving face overrides everything (brief goodbye)
