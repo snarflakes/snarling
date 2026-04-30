@@ -265,7 +265,20 @@ class ThermalSensor:
 
     def _process_frame(self, frame, timestamp):
         """Analyse one thermal frame and update shared state."""
-        ROWS, COLS = 24, 32
+        # Raw sensor dimensions (camera mounted 90° CW)
+        RAW_ROWS, RAW_COLS = 24, 32
+        # After 90° CCW rotation to correct orientation
+        ROWS, COLS = 32, 24
+
+        # 0. Rotate frame 90° CCW to match physical orientation
+        #    Camera is mounted 90° CW, so we undo it with 90° CCW.
+        #    rotated[r][c] = raw[c][(RAW_COLS-1)-r]
+        rotated = [0.0] * (ROWS * COLS)
+        for r in range(ROWS):
+            for c in range(COLS):
+                raw_r = c
+                raw_c = (RAW_COLS - 1) - r
+                rotated[r * COLS + c] = frame[raw_r * RAW_COLS + raw_c]
 
         # 1. Compute ambient using median of interior pixels (robust to edge
         #    artifacts and warm blobs). Edge margin pixels are excluded.
@@ -273,7 +286,7 @@ class ThermalSensor:
         for r in range(EDGE_MARGIN, ROWS - EDGE_MARGIN):
             row_offset = r * COLS
             for c in range(EDGE_MARGIN, COLS - EDGE_MARGIN):
-                interior_temps.append(frame[row_offset + c])
+                interior_temps.append(rotated[row_offset + c])
         interior_temps.sort()
         ambient = interior_temps[len(interior_temps) // 2]  # median
 
@@ -285,7 +298,7 @@ class ThermalSensor:
         for r in range(EDGE_MARGIN, ROWS - EDGE_MARGIN):
             row_offset = r * COLS
             for c in range(EDGE_MARGIN, COLS - EDGE_MARGIN):
-                if frame[row_offset + c] > threshold:
+                if rotated[row_offset + c] > threshold:
                     mask[r][c] = True
 
         # 4. Find blobs
@@ -315,7 +328,7 @@ class ThermalSensor:
                 continue  # too horizontal, skip
 
             # Average temperature of the blob
-            avg_temp = sum(frame[r * COLS + c] for r, c in blob) / size
+            avg_temp = sum(rotated[r * COLS + c] for r, c in blob) / size
 
             # Proximity score: bigger + hotter = closer
             # size/40: a person at 3ft is ~55-65 pixels → size_factor ≈ 1.0
