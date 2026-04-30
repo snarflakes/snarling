@@ -1,6 +1,6 @@
-# Snarling 🐾
+# Snarling
 
-<img width="800" height="800" alt="Snarling" src="https://github.com/user-attachments/assets/6a5f9196-0bcd-40ef-b045-28a8a6755dbb" />
+<img width="800" height="800" alt="snarling" src="https://github.com/user-attachments/assets/8683255b-94bc-4f6f-b858-64c81cc94ddc" />
 
 **A physical status companion for OpenClaw agents.** A Raspberry Pi-powered display that lives on your desk and shows what your AI is doing — even when you're not looking at a screen. It also lets your agent send you notifications with a feedback loop, so it can learn when and how to reach out.
 
