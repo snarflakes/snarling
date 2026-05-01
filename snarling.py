@@ -425,7 +425,9 @@ class snarlingCreature:
         now = time.time()
         if self._proximity_face_pending and now >= self._proximity_face_time:
             self._proximity_face_current = self._proximity_face_pending
+            self.current_face = self._proximity_face_pending  # Actually render the pending face
             self._proximity_face_pending = None
+            self.face_timer = 0  # Reset timer so next cycle starts from this face
             # Turn off LED and block proximity glow briefly
             self.display.set_led(0, 0, 0)
             self._led_block_presence_glow = True
