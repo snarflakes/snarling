@@ -23,6 +23,9 @@ sys.stderr.reconfigure(line_buffering=True)
 # OpenClaw polling client removed — state is now set via direct /state API from the plugin
 OPENCLAW_AVAILABLE = False
 
+# Environmental event posting to OpenClaw plugin
+ENVIRONMENTAL_EVENTS_ENABLED = True  # Set to False to disable posting events to OpenClaw
+
 # Screen dimensions
 WIDTH = DisplayHATMini.WIDTH
 HEIGHT = DisplayHATMini.HEIGHT
@@ -229,6 +232,9 @@ class snarlingCreature:
 
         # Thermal health check counter
         self._thermal_health_counter = 0
+
+        # Timestamp when person last left (for absent_duration)
+        self._last_absence_time = None
 
         # Track previous presence state for leaving-face detection
         self._prev_env_present = False
@@ -1026,6 +1032,23 @@ class snarlingCreature:
             # Clear the LED block so next presence starts fresh
             self._led_block_presence_glow = False
 
+        # Post presence change event to OpenClaw plugin
+        if present and self._last_absence_time is not None:
+            absent_duration = time.time() - self._last_absence_time
+            absent_str = self._format_duration(absent_duration)
+        else:
+            absent_str = None
+
+        self._post_environmental_event({
+            "type": "presence_change",
+            "present": present,
+            "absent_duration": absent_str,  # None on departure, formatted string on return
+            "timestamp": time.time(),
+        })
+
+        if not present:
+            self._last_absence_time = time.time()
+
         print(f"[snarling] Presence change: absent={absent}, present={present}")
 
     def _on_thermal_proximity_change(self, old_zone, new_zone, proximity, ambient_temp=None):
@@ -1071,6 +1094,41 @@ class snarlingCreature:
     def _ease_out_cubic(t):
         """Ease-out cubic: fast start, slow settle. t in [0, 1]."""
         return 1 - (1 - t) ** 3
+
+    @staticmethod
+    def _format_duration(seconds):
+        """Format seconds into a human-readable duration string like '3h20m' or '45s'."""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            minutes = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m{secs}s" if secs else f"{minutes}m"
+        else:
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            return f"{hours}h{minutes}m" if minutes else f"{hours}h"
+
+    def _post_environmental_event(self, event_data):
+        """Post an environmental event to the OpenClaw plugin.
+        Fire-and-forget — if the plugin isn't listening, that's fine.
+        Only posts if ENVIRONMENTAL_EVENTS_ENABLED is True."""
+        if not ENVIRONMENTAL_EVENTS_ENABLED:
+            return
+        try:
+            import requests as req_lib
+            gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+            req_lib.post(
+                "http://localhost:18789/environmental-event",
+                json=event_data,
+                headers={
+                    "Authorization": f"Bearer {gateway_token}",
+                    "Content-Type": "application/json"
+                },
+                timeout=2
+            )
+        except Exception:
+            pass  # Silent fail — plugin may not be running
 
     # ── End thermal callbacks ───────────────────────────────────────
 
