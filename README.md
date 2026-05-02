@@ -1,8 +1,8 @@
-# Snarling 🐾
+# Snarling
 
-<img width="800" height="800" alt="Snarling" src="https://github.com/user-attachments/assets/6a5f9196-0bcd-40ef-b045-28a8a6755dbb" />
+<img width="800" height="800" alt="snarling" src="https://github.com/user-attachments/assets/8683255b-94bc-4f6f-b858-64c81cc94ddc" />
 
-**A physical status companion for OpenClaw agents.** A Raspberry Pi-powered display that lives on your desk and shows what your AI is doing — even when you're not looking at a screen. It also lets your agent send you notifications with a feedback loop, so it can learn when and how to reach out.
+**A physical status companion for OpenClaw agents.** A Raspberry Pi-powered display that lives on your desk and shows what your AI is doing — even when you're not looking at a screen. It senses your presence with a thermal camera, lets your agent send you notifications with a feedback loop, and can ask for your approval with physical buttons.
 
 Inspired by [Pwnagotchi](https://pwnagotchi.ai/), built for OpenClaw.
 
@@ -22,6 +22,8 @@ Instead of checking your phone or terminal to see if your agent is working, rest
 | **Error** | `(╥☁╥ )` | Something went wrong |
 | **Awaiting Approval** | `( ⚆_⚆)` | Agent needs your yes/no decision |
 | **Notification** | `(◕‿‿◕)` | Agent has something to tell you |
+| **Proximity Aware** | `(≖◡◡≖)` | Someone is nearby while agent is sleeping (thermal sensor) |
+| **Leaving** | `(◡‿◡)` | Someone is walking away (thermal sensor, ~500ms) |
 
 Each state has its own color, LED pattern, and animation — breathing blue when sleeping, pulsing melon when processing, flashing red when approval is needed.
 
@@ -95,7 +97,56 @@ Snarling isn't just a display — it's an input device. When your agent needs ap
 | **X** | Toggle sleep mode | — |
 | **Y** | Toggle mute mode | — |
 
-When you press A or B, Snarling POSTs the decision back to the OpenClaw gateway's `/approval-callback` route, then sends a WebSocket RPC wake so the agent picks up the result immediately (~5 seconds total latency).
+When you press A or B, Snarling POSTs the decision or feedback back to the OpenClaw gateway's `/approval-callback` or `/notification-callback` routes, then sends a WebSocket RPC wake so the agent picks up the result immediately (~5 seconds total latency).
+
+## Thermal Presence Detection
+
+Snarling can detect human presence using an [MLX90640 thermal camera](https://melexis.com/en/product/mlx90640) mounted nearby. When connected, Snarling:
+
+- Detects when someone arrives or leaves (binary presence)
+- Tracks proximity zones (absent → approaching → present) for face expression changes
+- Posts presence change events to the OpenClaw gateway so your agent knows you're there
+- Gracefully degrades — if the camera isn't available, everything else works identically
+
+### How It Works
+
+The MLX90640 reads a 32×24 thermal grid at ~4 Hz. The `ThermalSensor` class (in `thermal.py`) runs as a daemon thread:
+
+1. **Frame processing**: Each frame computes ambient temperature, identifies warm blobs (≥3°C above ambient, ≥15 pixels, with aspect ratio filtering to reject oven heat plumes)
+2. **Debounce**: State changes require 2 consecutive frames to confirm (avoids flicker)
+3. **Proximity**: Calculated from blob size and warmth — larger, warmer blobs mean closer proximity
+4. **Callbacks**: `on_presence_change(was_absent, now_present, ambient_temp)` and `on_proximity_change(old_zone, new_zone, proximity, ambient_temp)` fire when confirmed state transitions happen
+
+### Presence Events to OpenClaw
+
+When someone arrives or leaves, Snarling POSTs an event to the OpenClaw gateway's `/environmental-event` route:
+
+```json
+{
+  "type": "presence_change",
+  "present": true,
+  "absent_duration": "3h20m",
+  "timestamp": 1714588800
+}
+```
+
+- `present`: `true` for arrival, `false` for departure
+- `absent_duration`: formatted string on return (e.g. `"45s"`, `"3m20s"`, `"2h15m"`), `null` on departure
+- `timestamp`: Unix epoch when the change was detected
+
+These events are routed to the agent via `ENVIRONMENTAL_SESSION_KEY` (see Configuration below). Proximity zone changes are **not** sent to the gateway — they're used internally by Snarling for face expressions and LED brightness only.
+
+### Configuration
+
+| Setting | Where | Default | Description |
+|----------|-------|---------|-------------|
+| `ENVIRONMENTAL_EVENTS_ENABLED` | `snarling.py` | `True` | Master switch — set to `False` to stop posting events |
+| `ENVIRONMENTAL_SESSION_KEY` | Gateway env var | `""` (empty) | Routes presence events to a specific agent session. Empty = events acknowledged but dropped. Set to `"agent:main:main"` for the orchestrator, or `"session:environmental"` for a dedicated environmental agent |
+
+### Known Issues
+
+- **Oven heat plume**: The double oven in the kitchen creates a rising heat column that the MLX90640 sees as a person-shaped warm blob (up to 70°C). Only happens when the oven is on. Temperature alone can't distinguish it from a person.
+- **Pi housing heat**: The Raspberry Pi housing surface appears in the MLX90640's field of view (bottom-left of rotated frame, rows 12–17, cols 13–15) as a persistent warm zone (~30–40°C). Not a laptop base — it's the Pi case itself.
 
 ## Architecture
 
@@ -104,11 +155,15 @@ When you press A or B, Snarling POSTs the decision back to the OpenClaw gateway'
 │  OpenClaw    │ ────────────────── │  Snarling     │ ───────────────► │  OpenClaw    │
 │  (plugin)    │   /state (5000)   │  Display      │  webhook + WS    │  Gateway     │
 │              │ ────────────────── │  + Buttons    │  wake           │              │
-│              │   /approval/alert  │               │                  │              │
+│              │   /approval/alert  │  + Thermal    │                  │              │
 │              │ ────────────────── │               │ ───────────────► │              │
 │              │   /approval/alert  │               │  /approval-cb    │              │
 │              │   (type: notify)   │               │ ───────────────► │              │
 │              │                    │               │  /notification-cb │              │
+│              │                    │               │                  │              │
+│              │                    │ ───────────────────────────────► │              │
+│              │                    │  /environmental-event            │              │
+│              │                    │  (presence_change events)        │              │
 └─────────────┘                    └──────────────┘                  └──────────────┘
 ```
 
@@ -120,12 +175,14 @@ When you press A or B, Snarling POSTs the decision back to the OpenClaw gateway'
 4. Snarling updates the display, LED, and face expression in real time
 5. When you press A (approve/reveal) or B (reject/dismiss), Snarling POSTs the decision or feedback back to the OpenClaw gateway
 6. Snarling sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
+7. When the thermal sensor detects presence changes, Snarling POSTs to the gateway's `/environmental-event` route
 
 ### Components
 
 | File | Purpose |
-|------|---------|
-| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server for state/approval API, WebSocket wake on approval |
+|------|----------|
+| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server, thermal presence detection, environmental event posting |
+| `thermal.py` | ThermalSensor class — MLX90640 daemon thread, frame processing, blob detection, debounce logic, presence/proximity callbacks |
 
 ## Hardware
 
@@ -146,12 +203,19 @@ git clone https://github.com/snarflakes/snarling.git
 cd snarling
 
 # Install dependencies
-pip install flask pillow requests websocket-client
+pip install flask pillow requests websocket-client mlx90640
 
-# Snarling is managed by myscript — auto-restarts on crash/kill
-# To run manually for testing:
+# Copy the systemd service file to enable auto-start
+sudo cp snarling.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable snarling.service
+# To start now: sudo systemctl start snarling.service
+
+# To run manually for testing (Ctrl+C to stop):
 python snarling.py
 ```
+
+The service file handles auto-restart on crash/kill.
 
 ### 2. Install the Interaction Bridge Plugin
 
@@ -189,6 +253,8 @@ Snarling runs a Flask server on port 5000:
 | `/counts` | GET | Get lifetime approve/reject counts |
 | `/health` | GET | Health check |
 | `/status` | GET | Get current state, notification stack, and active notification details |
+| `/presence` | GET | Get current thermal presence state (present, proximity, proximity_zone, ambient_temp, last_change) |
+| `/environment` | POST | Update environmental state from external sources (rejected when thermal sensor is active) |
 
 > The approval server on port 5001 (`approval_server.py`) has been removed. The plugin talks directly to Snarling on port 5000.
 
