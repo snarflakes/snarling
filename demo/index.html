@@ -120,7 +120,10 @@
     letter-spacing: 2px;
     white-space: pre;
     color: #fff;
-    transition: opacity 0.3s;
+    transition: opacity 0.3s, color 0.3s;
+  }
+  .face.alert-face {
+    color: #FF9800;
   }
 
   /* ── Notification banner — slides UP from bottom INSIDE the device box ── */
@@ -315,6 +318,7 @@
     alertRevealed = false;
     stopCycle();
     setFace('alert');
+    $face.classList.add('alert-face');
     showButtons(true);
     // Don't show banner yet — user presses A to reveal it
   }
@@ -336,7 +340,7 @@
     alertShown = false;
     alertTimeout = setTimeout(() => {
       fireAbsentAlert();
-    }, 10000);
+    }, 5000);
   }
 
   function enterPresent() {
@@ -383,6 +387,7 @@
         showButtons(false);
         absentAlertIndex++;
         state = 'idle';
+        $face.classList.remove('alert-face');
         cycleFace('sleeping', 2200);
       }
       return;
@@ -409,6 +414,7 @@
         hideBanner();
         showButtons(false);
         state = 'idle';
+        $face.classList.remove('alert-face');
         cycleFace('sleeping', 2200);
       }
       return;
