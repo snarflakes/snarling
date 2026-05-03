@@ -6,6 +6,12 @@
 
 Inspired by [Pwnagotchi](https://pwnagotchi.ai/), built for OpenClaw.
 
+## Live Demo (no hardware required)
+
+Try the interaction loop in your browser:
+
+👉 https://snarflakes.github.io/snarling/demo/
+
 ## What It Does
 
 Snarling is a tiny creature on a tiny screen. It reacts to your agent's state in real time — sleeping when idle, focused when processing, chatty when responding, and alert when it needs your approval on something. It can also nudge you with notifications — subtle at first, revealing more when you press A — and report back whether you actually read them, enabling notification attunement.
