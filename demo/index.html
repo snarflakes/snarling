@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snarling — Pi AI Presence Demo</title>
+<style>
+  /* ── Reset & base ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #fff;
+    color: #fff;
+    font-family: 'Courier New', Courier, monospace;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Main container ── */
+  #app {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  /* ── Device frame (the "physical" snarling box) ── */
+  .device {
+    width: 320px;
+    background: #1A1A2E;
+    border: 4px solid #2196F3;
+    border-radius: 20px;
+    padding: 20px;
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 14px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* ── Left side: camera/thermal sensor area ── */
+  .sensor-panel {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 70px;
+    flex-shrink: 0;
+  }
+
+  .sensor-box {
+    width: 60px;
+    height: 60px;
+    border: 1px solid #fff;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    background: #12122a;
+    gap: 4px;
+    cursor: pointer;
+    transition: border-color 0.3s, background 0.3s;
+  }
+  .sensor-box:hover {
+    border-color: #4eff88;
+    background: #1a1a3a;
+  }
+  .sensor-box:active {
+    transform: scale(0.95);
+  }
+  .sensor-box.on {
+    border-color: #4eff88;
+    background: #1a2a1a;
+  }
+
+  .sensor-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #444;
+    transition: background 0.4s;
+  }
+  .sensor-dot.active { background: #4eff88; }
+
+  .sensor-label {
+    font-size: 9px;
+    color: #888;
+    text-align: center;
+    line-height: 1.2;
+  }
+
+  /* ── Right side: main content area ── */
+  .main-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    position: relative;
+    min-height: 180px;
+  }
+
+  /* ── Inner face display ── */
+  .face-frame {
+    width: 100%;
+    height: 120px;
+    border: 1px solid #fff;
+    border-radius: 14px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: #12122a;
+  }
+
+  .face {
+    font-size: 36px;
+    letter-spacing: 2px;
+    white-space: pre;
+    color: #fff;
+    transition: opacity 0.3s;
+  }
+
+  /* ── Notification banner — slides UP from bottom INSIDE the device box ── */
+  .banner {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #2A2A3E;
+    border-top: 1px solid #fff;
+    padding: 12px 16px;
+    font-size: 12px;
+    color: #ccc;
+    transform: translateY(100%);
+    transition: transform 0.35s ease-out, opacity 0.35s ease-out;
+    opacity: 0;
+    z-index: 5;
+    text-align: center;
+    min-height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .banner.show {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  .banner.approval { border-top-color: #f0c040; color: #f0c040; }
+  .banner.approved { border-top-color: #4eff88; color: #4eff88; }
+  .banner.denied  { border-top-color: #ff4e6a; color: #ff4e6a; }
+  .banner.alert   { border-top-color: #ff4e6a; color: #ff4e6a; font-weight: bold; }
+
+  /* ── A/B approval buttons (right side, stacked) ── */
+  .ab-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .ab-btn {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    border: 2px solid #fff;
+    background: #1A1A2E;
+    color: #fff;
+    font-family: inherit;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: opacity 0.3s, transform 0.15s, background 0.2s;
+    opacity: 0.3;
+    pointer-events: auto;
+  }
+  .ab-btn.active {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .ab-btn:active { transform: scale(0.92); }
+  .ab-btn.a:hover { background: #4eff88; color: #1A1A2E; }
+  .ab-btn.b:hover { background: #ff4e6a; color: #1A1A2E; }
+</style>
+</head>
+<body>
+
+<!-- Main layout -->
+<div id="app">
+  <!-- Device frame -->
+  <div class="device">
+    <!-- Left: camera/thermal sensor panel -->
+    <div class="sensor-panel">
+      <div class="sensor-box" id="sensorBox" onclick="togglePresence()">
+        <div class="sensor-dot" id="sensorDot"></div>
+        <div class="sensor-label" id="sensorLabel">📷<br>absent</div>
+      </div>
+    </div>
+
+    <!-- Right: main content panel -->
+    <div class="main-panel">
+      <!-- Face display -->
+      <div class="face-frame">
+        <div class="face" id="face">(⇀‿‿↼)</div>
+      </div>
+
+      <!-- Notification banner — slides up from bottom of device box -->
+      <div class="banner" id="banner"></div>
+    </div>
+  </div>
+
+  <!-- A/B buttons (outside device frame, on the right) -->
+  <div class="ab-buttons">
+    <button class="ab-btn a" id="btnA" onclick="approve()">A</button>
+    <button class="ab-btn b" id="btnB" onclick="deny()">B</button>
+  </div>
+</div>
+
+<script>
+  /* ── Face expressions ── */
+  const FACES = {
+    sleeping:  ['(⇀‿‿↼)', '(≖‿‿≖)'],
+    present:   ['(◠‿◠)', '(◕‿◕)', '(◐‿◐)'],
+    processing:['(◕‿‿◕)', '(•‿‿•)', '(-__-)'],
+    alert:     ['(☉_☉)', '(⚠_⚠)'],
+    awaiting:  ['( ⚆_⚆)', '(☉_☉ )'],
+    happy:     ['(^‿‿^)'],
+    sad:       ['(╥☁╥ )'],
+    leaving:   ['(◡‿◡)']
+  };
+
+  /* ── State ── */
+  let state = 'idle';        // idle | present | awaiting_approval | result | alert
+  let present = false;
+  let faceIndex = 0;
+  let sleepInterval = null;
+  let timeouts = [];
+  let alertTimeout = null;   // 10s idle → single alert
+  let alertShown = false;    // whether the absent alert phase has started this cycle
+  let alertRevealed = false; // whether the alert text has been revealed via A press
+
+  /* ── DOM refs ── */
+  const $face       = document.getElementById('face');
+  const $sensorBox  = document.getElementById('sensorBox');
+  const $sensorDot  = document.getElementById('sensorDot');
+  const $sensorLabel= document.getElementById('sensorLabel');
+  const $btnA       = document.getElementById('btnA');
+  const $btnB       = document.getElementById('btnB');
+  const $banner     = document.getElementById('banner');
+
+  /* ── Helpers ── */
+  function setFace(key) {
+    const variants = FACES[key];
+    faceIndex = faceIndex % variants.length;
+    $face.textContent = variants[faceIndex];
+  }
+
+  function cycleFace(key, ms) {
+    stopCycle();
+    setFace(key);
+    sleepInterval = setInterval(() => {
+      faceIndex++;
+      setFace(key);
+    }, ms);
+  }
+
+  function stopCycle() {
+    if (sleepInterval) clearInterval(sleepInterval);
+    sleepInterval = null;
+  }
+
+  function showBanner(text, cls) {
+    // Show banner — never auto-dismiss, always requires button press
+    $banner.textContent = text;
+    $banner.className = 'banner ' + (cls || '');
+    $banner.classList.add('show');
+  }
+
+  function hideBanner() {
+    $banner.classList.remove('show');
+  }
+
+  function scheduleTimeout(fn, ms) {
+    const id = setTimeout(fn, ms);
+    timeouts.push(id);
+    return id;
+  }
+
+  function clearTimeouts() {
+    timeouts.forEach(id => clearTimeout(id));
+    timeouts = [];
+  }
+
+  function showButtons(active) {
+    $btnA.classList.toggle('active', active);
+    $btnB.classList.toggle('active', active);
+  }
+
+  /* ── Absent alert (one single alert per idle cycle, then back to sleep) ── */
+
+  const ABSENT_ALERTS = [
+    '⚠ Kitchen oven was left on!',
+    '⚠ Unusual heat detected near stove.',
+    '⚠ Front door sensor triggered.',
+    '⚠ High CPU temperature on Pi.',
+    '⚠ Network intrusion attempt blocked.',
+  ];
+  let absentAlertIndex = 0;
+
+  function fireAbsentAlert() {
+    if (present || alertShown) return;
+    state = 'alert';
+    alertShown = true;
+    alertRevealed = false;
+    stopCycle();
+    setFace('alert');
+    showButtons(true);
+    // Don't show banner yet — user presses A to reveal it
+  }
+
+  /* ── State transitions ── */
+
+  function enterIdle() {
+    state = 'idle';
+    stopCycle();
+    hideBanner();
+    showButtons(false);
+    $sensorBox.classList.remove('on');
+    $sensorDot.classList.remove('active');
+    $sensorLabel.innerHTML = '📷<br>absent';
+    cycleFace('sleeping', 2200);
+
+    // After 10s of idle, fire a single alert
+    clearTimeout(alertTimeout);
+    alertShown = false;
+    alertTimeout = setTimeout(() => {
+      fireAbsentAlert();
+    }, 10000);
+  }
+
+  function enterPresent() {
+    clearTimeout(alertTimeout);
+    alertShown = false;
+    state = 'present';
+    hideBanner();
+    $sensorBox.classList.add('on');
+    $sensorDot.classList.add('active');
+    $sensorLabel.innerHTML = '📷<br>present';
+    cycleFace('present', 1800);
+
+    // After 1.5s — greeting message
+    scheduleTimeout(() => {
+      if (state !== 'present') return;
+      showBanner("You're back.", '');
+    }, 1500);
+
+    // After 2.5s — approval request
+    scheduleTimeout(() => {
+      if (state !== 'present') return;
+      enterAwaitingApproval('Want to hear a joke?');
+    }, 2500);
+  }
+
+  function enterAwaitingApproval(question) {
+    state = 'awaiting_approval';
+    cycleFace('awaiting', 2000);
+    showBanner(question || 'Approve: Run task?', 'approval');
+    showButtons(true);
+  }
+
+  function approve() {
+    // A button when not present
+    if (!present) {
+      if (state === 'alert' && !alertRevealed) {
+        // Reveal the notification text
+        alertRevealed = true;
+        const msg = ABSENT_ALERTS[absentAlertIndex % ABSENT_ALERTS.length];
+        showBanner(msg, 'alert');
+      } else if (state === 'alert' && alertRevealed) {
+        // Already revealed — acknowledge and go back to sleep
+        hideBanner();
+        showButtons(false);
+        absentAlertIndex++;
+        state = 'idle';
+        cycleFace('sleeping', 2200);
+      }
+      return;
+    }
+    // During result state: dismiss result banner, return to present
+    if (state === 'result') {
+      hideBanner();
+      cycleFace('present', 1800);
+      state = 'present';
+      return;
+    }
+    if (state !== 'awaiting_approval') return;
+    state = 'result';
+    stopCycle();
+    setFace('happy');
+    showButtons(true);
+    showBanner('😂 Why do programmers prefer dark mode? Because light attracts bugs!', 'approved');
+  }
+
+  function deny() {
+    // B button when not present: dismiss without revealing, back to sleep
+    if (!present) {
+      if (state === 'alert') {
+        hideBanner();
+        showButtons(false);
+        state = 'idle';
+        cycleFace('sleeping', 2200);
+      }
+      return;
+    }
+    // During result state: dismiss result banner, return to present
+    if (state === 'result') {
+      hideBanner();
+      cycleFace('present', 1800);
+      state = 'present';
+      return;
+    }
+    if (state !== 'awaiting_approval') return;
+    state = 'result';
+    stopCycle();
+    setFace('sad');
+    showButtons(true);
+    showBanner('No worries, maybe next time! 💤', 'denied');
+  }
+
+  function leave() {
+    // Brief leaving face, then idle
+    stopCycle();
+    clearTimeouts();
+    hideBanner();
+    setFace('leaving');
+    setTimeout(() => {
+      enterIdle();
+    }, 500);
+  }
+
+  /* ── Toggle presence (click sensor box) ── */
+  function togglePresence() {
+    present = !present;
+    if (present) {
+      clearTimeouts();
+      enterPresent();
+    } else {
+      clearTimeouts();
+      leave();
+    }
+  }
+
+  /* ── Start in idle ── */
+  enterIdle();
+</script>
+</body>
+</html>
