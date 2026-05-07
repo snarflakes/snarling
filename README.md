@@ -195,7 +195,10 @@ These events are routed to the agent via `ENVIRONMENTAL_SESSION_KEY` (see Config
 - **Display:** [Pimoroni Display HAT Mini](https://shop.pimoroni.com/products/display-hat-mini) (320×240 IPS)
 - **Computer:** Raspberry Pi 4 (recommended)
 - **Case:** Argon One V2 (fits nicely, keeps it cool)
-- **Rotation:** 180° (configured in software)
+- **Header Adapter:** [for getting the angle right on the display](https://www.adafruit.com/product/2823)
+- **Thermal Camera:** [MLX plugs right into header](https://www.adafruit.com/product/4469)
+- **StemmaQT Cable:** [need this cable to plug camera into the display for power and data](https://www.adafruit.com/product/4210)
+
 ![IMG_8292](https://github.com/user-attachments/assets/a3d8e3e8-a689-4948-94ee-bfa1f3cf6c29)
 
 ## Setup
