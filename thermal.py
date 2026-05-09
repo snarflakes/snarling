@@ -23,13 +23,31 @@ logging.basicConfig(
 logger = logging.getLogger("snarling.thermal")
 
 # ── Detection tuning ──────────────────────────────────────────────────
-PERSON_DELTA = 3.0        # °C above ambient to count as "warm"
+PERSON_DELTA_NORMAL = 3.0  # °C above ambient at normal room temp (<25°C)
+PERSON_DELTA_WARM = 2.0    # °C above ambient when kitchen is warm (25-30°C)
+PERSON_DELTA_HOT = 1.5    # °C above ambient when kitchen is hot (>30°C)
 MIN_PERSON_PIXELS = 15    # minimum blob size to qualify as a person
 MIN_BLOB_ASPECT = 0.25    # minimum width/height ratio (rejects tall narrow edge artifacts)
 EDGE_MARGIN = 2           # ignore outermost N rows/columns (MLX90640 edge artifacts)
 DEBOUNCE_FRAMES = 2       # consecutive frames required to confirm state change
 READ_INTERVAL = 0.25       # seconds between frames (~4 Hz)
 ERROR_BACKOFF = 5.0       # seconds to wait after a read error
+
+
+def person_delta(ambient):
+    """Adaptive threshold: lower delta when ambient is high to reduce false negatives.
+
+    When the kitchen is warm (stove on), the temperature difference between
+    a person and the background shrinks. Lowering the threshold prevents
+    false negatives where you disappear from detection.
+    Tradeoff: more false positives from stove heat (acceptable).
+    """
+    if ambient < 25:
+        return PERSON_DELTA_NORMAL
+    elif ambient < 30:
+        return PERSON_DELTA_WARM
+    else:
+        return PERSON_DELTA_HOT
 
 # Proximity zone thresholds
 ZONE_ABSENT = "absent"         # proximity == 0.0
@@ -290,8 +308,8 @@ class ThermalSensor:
         interior_temps.sort()
         ambient = interior_temps[len(interior_temps) // 2]  # median
 
-        # 2. Threshold
-        threshold = ambient + PERSON_DELTA
+        # 2. Threshold (adaptive — lower when ambient is high to reduce false negatives)
+        threshold = ambient + person_delta(ambient)
 
         # 3. Binary mask — exclude edge pixels to avoid MLX90640 artifacts
         mask = [[False] * COLS for _ in range(ROWS)]

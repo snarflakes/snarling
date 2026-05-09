@@ -178,7 +178,7 @@ class snarlingCreature:
         self._notify_callback_url = None  # where to POST feedback
         self._notify_session_key = None   # session routing
         self._notify_secret = None        # auth secret (same APPROVAL_SECRET)
-        self._notify_duration = 0         # auto-dismiss timeout in seconds (0 = use priority-based default: low=300s, others=no timeout)
+        self._notify_duration = 0         # auto-dismiss timeout in seconds (0 = use priority-based default: low=28800s, others=no timeout)
         self._notify_sent_time = 0       # when the notification was sent (epoch) — for computing total time-to-reveal including queue
 
         # Notification stack (priority-sorted pending queue)
@@ -235,6 +235,10 @@ class snarlingCreature:
 
         # Timestamp when person last left (for absent_duration)
         self._last_absence_time = None
+        # Settling timer — fires presence_settled after 90s stable presence
+        self._settling_timer = None
+        self._is_settled = False
+        self._last_absence_duration_sec = None
 
         # Track previous presence state for leaving-face detection
         self._prev_env_present = False
@@ -1036,15 +1040,36 @@ class snarlingCreature:
         if present and self._last_absence_time is not None:
             absent_duration = time.time() - self._last_absence_time
             absent_str = self._format_duration(absent_duration)
+            self._last_absence_duration_sec = absent_duration
         else:
             absent_str = None
+            absent_duration_sec = None
 
-        self._post_environmental_event({
+        # Only include absent_duration_sec on return events
+        event_data = {
             "type": "presence_change",
             "present": present,
             "absent_duration": absent_str,  # None on departure, formatted string on return
             "timestamp": time.time(),
-        })
+        }
+        if present and self._last_absence_duration_sec is not None:
+            event_data["absent_duration_sec"] = self._last_absence_duration_sec
+
+        self._post_environmental_event(event_data)
+
+        if present:
+            # Start settling timer — fire presence_settled after 90s of stable presence
+            if self._settling_timer is not None:
+                self._settling_timer.cancel()
+            self._settling_timer = threading.Timer(90.0, self._on_presence_settled)
+            self._settling_timer.daemon = True
+            self._settling_timer.start()
+        else:
+            # Cancel settling timer and reset state if they leave before settling
+            if self._settling_timer is not None:
+                self._settling_timer.cancel()
+                self._settling_timer = None
+            self._is_settled = False
 
         if not present:
             self._last_absence_time = time.time()
@@ -1129,6 +1154,20 @@ class snarlingCreature:
             )
         except Exception:
             pass  # Silent fail — plugin may not be running
+
+    def _on_presence_settled(self):
+        """Called 90 seconds after stable presence detected.
+        Fires presence_settled event to the agent."""
+        self._is_settled = True
+        absent_sec = self._last_absence_duration_sec
+        absent_str = self._format_duration(absent_sec) if absent_sec else None
+        self._post_environmental_event({
+            "type": "presence_settled",
+            "absent_duration": absent_str,
+            "absent_duration_sec": absent_sec if absent_sec else 0,
+            "timestamp": time.time(),
+        })
+        print(f"[snarling] Presence settled (absent for {absent_str or 'unknown'} before return)")
 
     # ── End thermal callbacks ───────────────────────────────────────
 
@@ -1450,7 +1489,7 @@ class snarlingCreature:
             "message": message, "priority": priority, "_seq": self._notify_seq,
             "notification_id": notification_id, "callback_url": callback_url,
             "session_key": session_key, "secret": secret,
-            "duration": duration if duration is not None else (300 if priority == 'low' else 0),
+            "duration": duration if duration is not None else (28800 if priority == 'low' else 0),
             "sent_time": time.time()  # epoch when notification arrived at snarling
         }
         print(f"[snarling] set_notification: priority={priority}, duration_in={duration}, item_duration={item['duration']}")
@@ -1515,7 +1554,7 @@ class snarlingCreature:
         self._notify_callback_url = item.get('callback_url')
         self._notify_session_key = item.get('session_key')
         self._notify_secret = item.get('secret')
-        self._notify_duration = item.get('duration', 300) or 0  # 0 = no timeout (stays until dismissed)
+        self._notify_duration = item.get('duration', 28800) or 0  # 0 = no timeout (stays until dismissed)
         self._notify_sent_time = item.get('sent_time', 0)  # when notification arrived at snarling
 
         # Prepare banners
@@ -1553,7 +1592,7 @@ class snarlingCreature:
             self._notify_callback_url = item.get('callback_url')
             self._notify_session_key = item.get('session_key')
             self._notify_secret = item.get('secret')
-            self._notify_duration = item.get('duration', 300) or 0  # 0 = no timeout
+            self._notify_duration = item.get('duration', 28800) or 0  # 0 = no timeout
             self._notify_sent_time = item.get('sent_time', 0)  # when notification arrived at snarling
             # Prepare banners for the new notification
             self._prepare_notify_banners(message, priority)
@@ -1780,8 +1819,8 @@ class snarlingCreature:
 
         # Check notification timeout (only low-priority notifications auto-dismiss)
         # High and normal priority stay until the user interacts
-        # duration=0 means "use priority-based default" (low=300s, others=no timeout)
-        effective_duration = self._notify_duration if self._notify_duration > 0 else (300 if self._notify_priority == 'low' else 0)
+        # duration=0 means "use priority-based default" (low=28800s, others=no timeout)
+        effective_duration = self._notify_duration if self._notify_duration > 0 else (28800 if self._notify_priority == 'low' else 0)
         if self._notify_active and self.state == STATE_NOTIFYING and self._notify_start_time > 0:
             if self._notify_priority == 'low' and effective_duration > 0:
                 elapsed_notify = time.time() - self._notify_start_time
@@ -1988,7 +2027,7 @@ if FLASK_AVAILABLE and approval_app:
             notification_id = data.get('notification_id')
             callback_url = data.get('callback_url')
             session_key = data.get('sessionKey')
-            duration = data.get('duration', 300)
+            duration = data.get('duration', 28800)
             if creature_instance:
                 creature_instance.set_notification(message, priority=priority, notification_id=notification_id, callback_url=callback_url, session_key=session_key, secret=secret, duration=duration)
                 print(f"[snarling] Received notification: priority={priority}, notify_id={notification_id}")
