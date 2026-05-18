@@ -37,6 +37,7 @@ STATE_COMMUNICATING = "communicating"
 STATE_ERROR = "error"
 STATE_AWAITING_APPROVAL = "awaiting_approval"
 STATE_NOTIFYING = "notifying"
+STATE_LISTENING = "listening"
 
 # Color constants
 COLOR_BG = (26, 26, 46)       # Deep charcoal #1A1A2E
@@ -45,6 +46,7 @@ COLOR_SLEEP = (100, 150, 255)
 COLOR_PROCESS = (255, 168, 148)  # Light melon
 COLOR_COMM = (0, 255, 220)
 COLOR_ERROR = (255, 80, 80)
+COLOR_LISTEN = (0, 200, 180)  # Teal for listening state
 
 # New design system colors
 COLOR_BG_NEW = (26, 26, 46)        # Deep charcoal #1A1A2E
@@ -97,6 +99,9 @@ class FaceExpressions:
     # Awaiting approval faces - alert, watching
     AWAITING_APPROVAL = ['( ⚆_⚆)', '(☉_☉ )']
 
+    # Listening faces - attentive, ears perked
+    LISTENING = ['( ◠‿◠ )', '( ◕‿◕ )', '( ◑‿◑ )']
+
     # Notification faces - priority-based
     # High: urgent, demanding attention
     NOTIFY_HIGH = ['(☉_☉)', '(ಠ_ಠ)', '(⚠_⚠)']
@@ -124,6 +129,8 @@ class FaceExpressions:
             return cls.ERROR
         elif state == STATE_AWAITING_APPROVAL:
             return cls.AWAITING_APPROVAL
+        elif state == STATE_LISTENING:
+            return cls.LISTENING
         elif state == STATE_NOTIFYING:
             return cls.get_notify_faces(priority or 'normal')
         return cls.SLEEP
@@ -235,7 +242,7 @@ class snarlingCreature:
 
         # Timestamp when person last left (for absent_duration)
         self._last_absence_time = None
-        # Settling timer — fires presence_settled after 90s stable presence
+        # Settling timer — fires presence_settled after 60s stable presence
         self._settling_timer = None
         self._is_settled = False
         self._last_absence_duration_sec = None
@@ -319,7 +326,7 @@ class snarlingCreature:
         proximity_brightness = max(0.15, min(self._brightness_current, 1.0))
 
         # Determine base LED color from state
-        if self.led_timer > 0 or self.state in (STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_AWAITING_APPROVAL, STATE_NOTIFYING):
+        if self.led_timer > 0 or self.state in (STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_AWAITING_APPROVAL, STATE_NOTIFYING, STATE_LISTENING):
             # Only clear presence glow block when actually leaving (proximity drops), not on state change
             # (block will clear naturally when env_present goes false in the presence callback)
             # State-driven LED colors
@@ -343,6 +350,11 @@ class snarlingCreature:
                 blink = 1.0 if int(self.breath_phase * 4) % 2 == 0 else 0.2
                 blink *= 0.7
                 base_r, base_g, base_b = blink, 0, 0
+            elif self.state == STATE_LISTENING:
+                # Teal pulse for listening
+                pulse = 0.4 + 0.3 * math.sin(self.breath_phase * 2)
+                pulse *= 0.7
+                base_r, base_g, base_b = 0, pulse * 0.8, pulse * 0.7
             elif self.state == STATE_NOTIFYING:
                 if self._notify_showing_notify_face:
                     led_color = NOTIFY_LED_COLORS.get(self._notify_priority, NOTIFY_LED_COLORS['normal'])
@@ -405,6 +417,7 @@ class snarlingCreature:
                     STATE_PROCESSING: COLOR_PROCESS,
                     STATE_COMMUNICATING: COLOR_COMM,
                     STATE_ERROR: COLOR_ERROR,
+                    STATE_LISTENING: COLOR_LISTEN,
                 }
                 return pre_colors.get(self._notify_pre_state, COLOR_SLEEP)
         colors = {
@@ -412,7 +425,8 @@ class snarlingCreature:
             STATE_PROCESSING: COLOR_PROCESS,
             STATE_COMMUNICATING: COLOR_COMM,
             STATE_ERROR: COLOR_ERROR,
-            STATE_AWAITING_APPROVAL: COLOR_ERROR  # Red for approval alert
+            STATE_AWAITING_APPROVAL: COLOR_ERROR,  # Red for approval alert
+            STATE_LISTENING: COLOR_LISTEN,  # Teal for listening
         }
         return colors.get(self.state, COLOR_SLEEP)
 
@@ -515,6 +529,10 @@ class snarlingCreature:
             # Alert movement - quick jitter
             self.animation_offset_x = int(4 * math.sin(self.breath_phase * 6))
             self.animation_offset_y = int(2 * math.cos(self.breath_phase * 5))
+        elif self.state == STATE_LISTENING:
+            # Gentle sway, attentive
+            self.animation_offset_x = int(3 * math.sin(self.breath_phase * 2))
+            self.animation_offset_y = int(2 * math.sin(self.breath_phase * 1.5))
         elif self.state == STATE_NOTIFYING:
             if self._notify_priority == 'high':
                 # Quick jitter (like awaiting_approval)
@@ -681,6 +699,10 @@ class snarlingCreature:
         elif self.state == STATE_AWAITING_APPROVAL:
             fill_count = 5
             box_color = COLOR_ERROR  # Red
+        elif self.state == STATE_LISTENING:
+            # Pulsing fill: cycle 1-5 to show listening activity
+            fill_count = (self.face_index % 5) + 1
+            box_color = COLOR_LISTEN  # Teal
         elif self.state == STATE_NOTIFYING and self._notify_active:
             # Fill based on priority: high=5, normal=3, low=1
             priority_fill = {'high': 5, 'normal': 3, 'low': 1}
@@ -953,6 +975,46 @@ class snarlingCreature:
         self.status_message = "❤️ Heartbeat OK"
         self.status_timer = 60
 
+    def trigger_voice_input(self):
+        """Trigger voice recording via the openclaw-voice-bridge"""
+        import threading
+
+        self.state = STATE_LISTENING
+        self.status_message = "🎤 Listening..."
+        self.status_timer = 360  # Show for ~12 seconds (max recording + transcription time)
+        self.led_timer = 10
+
+        def _post_voice_request():
+            """POST to openclaw-voice-bridge in background thread"""
+            try:
+                import requests as req_lib
+                gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+                url = "http://localhost:18789/start-listening"
+                print(f"[snarling] POST {url}")
+                response = req_lib.post(
+                    url,
+                    json={},
+                    headers={"Authorization": f"Bearer {gateway_token}"},
+                    timeout=20,
+                )
+                print(f"[snarling] Voice input response: {response.status_code} {response.text[:200]}")
+                # Plugin responds immediately with { status: "recording", duration: N }
+                # Plugin will set snarling state to "processing" (thinking) then "sleeping" (done)
+                # via the /state API, so we don't need to manage state transitions here.
+                # Just reset state on error.
+                if response.status_code != 200:
+                    print(f"[snarling] Voice input failed: {response.status_code}")
+                    self.state = STATE_SLEEPING
+                    self.led_timer = 0
+                # On success, the plugin handles state transitions
+            except Exception as e:
+                print(f"[snarling] Voice input error: {e}")
+                self.state = STATE_SLEEPING
+                self.led_timer = 0
+
+        voice_thread = threading.Thread(target=_post_voice_request, daemon=True)
+        voice_thread.start()
+
     def toggle_sleep_mode(self):
         """Toggle sleep mode for screen (replaces cycle_state)"""
         self.screen_asleep = not self.screen_asleep
@@ -1058,10 +1120,10 @@ class snarlingCreature:
         self._post_environmental_event(event_data)
 
         if present:
-            # Start settling timer — fire presence_settled after 90s of stable presence
+            # Start settling timer — fire presence_settled after 60s of stable presence
             if self._settling_timer is not None:
                 self._settling_timer.cancel()
-            self._settling_timer = threading.Timer(90.0, self._on_presence_settled)
+            self._settling_timer = threading.Timer(60.0, self._on_presence_settled)
             self._settling_timer.daemon = True
             self._settling_timer.start()
         else:
@@ -1777,12 +1839,12 @@ class snarlingCreature:
                         self._dismiss_notification()
                 else:
                     # Normal button handling
-                    if name == 'B':
-                        self.trigger_heartbeat()
-                    elif name == 'X':
-                        self.toggle_sleep_mode()
+                    if name == 'X':
+                        self.trigger_voice_input()
                     elif name == 'Y':
-                        self.toggle_mute()
+                        self.toggle_sleep_mode()
+                    elif name == 'B':
+                        pass  # B handled by approval/notification above
 
             self.button_pressed[name] = pressed
 
@@ -2098,7 +2160,7 @@ if FLASK_AVAILABLE and approval_app:
             return jsonify({"error": "No JSON data"}), 400
 
         state = data.get('state', '').lower()
-        valid_states = [STATE_SLEEPING, STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR]
+        valid_states = [STATE_SLEEPING, STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_LISTENING]
 
         if state not in valid_states:
             return jsonify({"error": f"Invalid state. Must be one of: {valid_states}"}), 400
