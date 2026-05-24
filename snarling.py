@@ -19,6 +19,14 @@ import threading
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+# Debug log file for tracking issues
+def append_log(msg):
+    try:
+        with open("/tmp/snarling-debug.log", "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except:
+        pass
+
 # Import OpenClaw integration
 # OpenClaw polling client removed — state is now set via direct /state API from the plugin
 OPENCLAW_AVAILABLE = False
@@ -976,43 +984,95 @@ class snarlingCreature:
         self.status_timer = 60
 
     def trigger_voice_input(self):
-        """Trigger voice recording via the openclaw-voice-bridge"""
+        """Record audio locally, then POST WAV path to plugin for transcription"""
         import threading
+        import subprocess
 
         self.state = STATE_LISTENING
         self.status_message = "🎤 Listening..."
-        self.status_timer = 360  # Show for ~12 seconds (max recording + transcription time)
+        self.status_timer = 360  # Show for ~12 seconds
         self.led_timer = 10
 
-        def _post_voice_request():
-            """POST to openclaw-voice-bridge in background thread"""
+        def _record_and_post():
+            """Record audio in background thread, then POST path to plugin"""
             try:
-                import requests as req_lib
-                gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
-                url = "http://localhost:18789/start-listening"
-                print(f"[snarling] POST {url}")
-                response = req_lib.post(
-                    url,
-                    json={},
-                    headers={"Authorization": f"Bearer {gateway_token}"},
-                    timeout=20,
+                wav_path = f"/tmp/voice_recording.{int(time.time())}.wav"
+                duration = 20
+                device = "plughw:3,0"
+
+                # Step 1: Record immediately (no gateway dependency)
+                print(f"[snarling] Starting arecord: {duration}s from {device}")
+                try: append_log(f"arecord start {duration}s")
+                except: pass
+
+                result = subprocess.run(
+                    ["arecord", "-D", device, "-f", "S16_LE", "-c", "1", "-r", "24000", "-d", str(duration), wav_path],
+                    capture_output=True, timeout=duration + 5
                 )
-                print(f"[snarling] Voice input response: {response.status_code} {response.text[:200]}")
-                # Plugin responds immediately with { status: "recording", duration: N }
-                # Plugin will set snarling state to "processing" (thinking) then "sleeping" (done)
-                # via the /state API, so we don't need to manage state transitions here.
-                # Just reset state on error.
-                if response.status_code != 200:
-                    print(f"[snarling] Voice input failed: {response.status_code}")
+
+                if result.returncode != 0:
+                    print(f"[snarling] arecord failed: {result.stderr.decode()[:200]}")
+                    try: append_log(f"arecord failed: {result.stderr.decode()[:100]}")
+                    except: pass
                     self.state = STATE_SLEEPING
                     self.led_timer = 0
-                # On success, the plugin handles state transitions
+                    return
+
+                print(f"[snarling] arecord complete: {wav_path}")
+                try: append_log(f"arecord complete, posting to plugin")
+                except: pass
+
+                # Show thinking state
+                self.state = STATE_PROCESSING
+                self.status_message = "🤔 Thinking..."
+                self.status_timer = 360
+
+                # Step 2: POST WAV path to plugin for transcription + injection
+                import requests as req_lib
+                gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+                url = "http://localhost:18789/transcribe-and-reply"
+                try:
+                    response = req_lib.post(
+                        url,
+                        json={"wav_path": wav_path},
+                        headers={"Authorization": f"Bearer {gateway_token}"},
+                        timeout=30,
+                    )
+                    print(f"[snarling] Transcribe response: {response.status_code} {response.text[:200]}")
+                    try: append_log(f"transcribe response: {response.status_code}")
+                    except: pass
+                    if response.status_code != 200:
+                        print(f"[snarling] Transcribe failed: {response.status_code}")
+                        self.state = STATE_SLEEPING
+                        self.led_timer = 0
+                    # On success, plugin handles state transitions via /state API
+                except Exception as e:
+                    print(f"[snarling] Transcribe POST error: {e}")
+                    try: append_log(f"transcribe error: {e}")
+                    except: pass
+                    self.state = STATE_SLEEPING
+                    self.led_timer = 0
+
+                # Don't clean up WAV — plugin will read it async.
+                # Clean up after a delay instead.
+                import threading
+                def _cleanup_later(path, delay=60):
+                    import time
+                    time.sleep(delay)
+                    try:
+                        os.unlink(path)
+                    except:
+                        pass
+                threading.Thread(target=_cleanup_later, args=(wav_path,), daemon=True).start()
+
             except Exception as e:
                 print(f"[snarling] Voice input error: {e}")
+                try: append_log(f"voice error: {e}")
+                except: pass
                 self.state = STATE_SLEEPING
                 self.led_timer = 0
 
-        voice_thread = threading.Thread(target=_post_voice_request, daemon=True)
+        voice_thread = threading.Thread(target=_record_and_post, daemon=True)
         voice_thread.start()
 
     def toggle_sleep_mode(self):
@@ -1813,13 +1873,19 @@ class snarlingCreature:
             pressed = self.display.read_button(button)
 
             if pressed and not self.button_pressed[name]:
+                print(f"[snarling] Button {name} PRESSED (state={self.state})")
+                try: append_log(f"Button {name} PRESSED (state={self.state})")
+                except: pass
                 # Button just pressed - check approval state first
                 if self.state == STATE_AWAITING_APPROVAL:
                     if name == 'A':
                         self.approve_request()
                     elif name == 'B':
                         self.reject_request()
-                    # X and Y don't do anything in approval state
+                    elif name == 'X':
+                        self.status_message = "💤 Let me sleep first"
+                        self.status_timer = 120
+                        print(f"[snarling] X press blocked — awaiting approval")
                 elif self.state == STATE_NOTIFYING and self._notify_active:
                     # Notification interaction
                     if name == 'A':
@@ -1837,10 +1903,20 @@ class snarlingCreature:
                         # Dismiss without revealing (snooze/dismiss)
                         self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=True, time_in_queue_sec=self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0)
                         self._dismiss_notification()
+                    elif name == 'X':
+                        self.status_message = "💤 Let me sleep first"
+                        self.status_timer = 120
+                        print(f"[snarling] X press blocked — notification active")
                 else:
                     # Normal button handling
                     if name == 'X':
-                        self.trigger_voice_input()
+                        if self.state == STATE_SLEEPING:
+                            self.trigger_voice_input()
+                        else:
+                            # Voice input only available during sleeping state
+                            self.status_message = "💤 Let me sleep first"
+                            self.status_timer = 120  # Show for ~4 seconds
+                            print(f"[snarling] X press blocked — state is {self.state}, not sleeping")
                     elif name == 'Y':
                         self.toggle_sleep_mode()
                     elif name == 'B':
