@@ -187,6 +187,7 @@ class snarlingCreature:
         self._notify_message = ''
         self._notify_start_time = 0
         self._notify_text_revealed = False
+        self._notify_feedback_sent = False  # Prevent double callback on A-then-B
         self._notify_pre_state = STATE_SLEEPING  # state to return to after notification
         self._notify_showing_notify_face = False  # True when current face is a notification face
         self._notify_id = None           # notification_id from plugin
@@ -1740,6 +1741,7 @@ class snarlingCreature:
         self._notify_message = message
         self._notify_start_time = time.time()
         self._notify_text_revealed = False
+        self._notify_feedback_sent = False
         # Store feedback metadata from stack item
         self._notify_id = item.get('notification_id')
         self._notify_callback_url = item.get('callback_url')
@@ -1778,6 +1780,7 @@ class snarlingCreature:
             self._notify_message = message
             self._notify_start_time = time.time()
             self._notify_text_revealed = False
+            self._notify_feedback_sent = False
             # Store feedback metadata from stack item
             self._notify_id = item.get('notification_id')
             self._notify_callback_url = item.get('callback_url')
@@ -1802,6 +1805,7 @@ class snarlingCreature:
         self._notify_priority = 'normal'
         self._notify_message = ''
         self._notify_text_revealed = False
+        self._notify_feedback_sent = False
         self._notify_start_time = 0
         self._notify_pre_state = STATE_SLEEPING
         # Clean up notification feedback metadata
@@ -1963,6 +1967,7 @@ class snarlingCreature:
                         if not self._notify_text_revealed:
                             # Reveal notification text
                             self._notify_text_revealed = True
+                            self._notify_feedback_sent = True
                             elapsed = time.time() - self._notify_start_time
                             queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
                             self.forward_notification_feedback(revealed=True, time_to_reveal_sec=elapsed, dismissed=False, time_in_queue_sec=queue_time)
@@ -1972,7 +1977,10 @@ class snarlingCreature:
                             self._dismiss_notification()
                     elif name == 'B':
                         # Dismiss without revealing (snooze/dismiss)
-                        self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=True, time_in_queue_sec=self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0)
+                        if not self._notify_feedback_sent:
+                            self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=True, time_in_queue_sec=self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0)
+                        else:
+                            print(f"[snarling] B press after reveal — feedback already sent, skipping")
                         self._dismiss_notification()
                     elif name == 'X':
                         self.status_message = "💤 Let me sleep first"
@@ -2040,8 +2048,12 @@ class snarlingCreature:
                 elapsed_notify = time.time() - self._notify_start_time
                 if elapsed_notify >= effective_duration:
                     print(f"[snarling] Low-priority notification timed out after {effective_duration}s")
-                    queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
-                    self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True, time_in_queue_sec=queue_time)
+                    if not self._notify_feedback_sent:
+                        queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
+                        self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True, time_in_queue_sec=queue_time)
+                        self._notify_feedback_sent = True
+                    else:
+                        print(f"[snarling] Timeout feedback skipped — already sent")
                     self._dismiss_notification()
 
         # Decrement status timer every frame (even when screen is asleep)
