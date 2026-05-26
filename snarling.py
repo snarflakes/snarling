@@ -212,7 +212,17 @@ class snarlingCreature:
         # LED timer for state change indication
         self.led_timer = 0
 
-        # ── Thermal sensor integration ──────────────────────────
+        # ── Mic availability ────────────────────────────────────
+        self._mic_available = False
+        try:
+            import subprocess as _sp
+            result = _sp.run(["arecord", "-l"], capture_output=True, text=True, timeout=3)
+            self._mic_available = "card 3" in result.stdout or "plughw:3,0" in result.stdout
+            print(f"[snarling] Mic check: {'found' if self._mic_available else 'not found'}")
+        except Exception as e:
+            print(f"[snarling] Mic check failed: {e}")
+
+        # ── Thermal sensor integration ──────────────────────────────────
         self.thermal = None
         self._thermal_available = False
 
@@ -1977,6 +1987,10 @@ class snarlingCreature:
                             self.status_message = "💤 Let me sleep first"
                             self.status_timer = 120  # Show for ~4 seconds
                             print(f"[snarling] X press blocked — state is {self.state}")
+                        elif not self._mic_available:
+                            self.status_message = "No mic found"
+                            self.status_timer = 120  # Show for ~4 seconds
+                            print(f"[snarling] X press blocked — no mic available")
                         else:
                             self.trigger_voice_input()
                     elif name == 'Y':
