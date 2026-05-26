@@ -838,7 +838,13 @@ class snarlingCreature:
 
         # Mute indicator
         if self.mute:
-            self.draw.text((text_left, banner_bottom - 20), "🔇", fill=(150, 150, 150))
+            # Emoji rendered with NotoSansSymbols2 (DejaVu doesn't have emoji glyphs)
+            if not hasattr(self, '_emoji_font_small'):
+                try:
+                    self._emoji_font_small = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", 14)
+                except OSError:
+                    self._emoji_font_small = ImageFont.load_default()
+            self.draw.text((text_left, banner_bottom - 20), "🔇", fill=(150, 150, 150), font=self._emoji_font_small)
 
         # State indicator (only show when no active banner)
         if not self._is_banner_active():
@@ -946,18 +952,31 @@ class snarlingCreature:
 
         # Status message overlay (non-approval, non-notification)
         elif self.status_timer > 0:
-            try:
-                status_font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
-                )
-            except OSError:
-                status_font = ImageFont.load_default()
-            # Word-wrap text within the banner area
+            # Cache status and emoji fonts
+            if not hasattr(self, '_status_font'):
+                try:
+                    self._status_font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
+                    )
+                except OSError:
+                    self._status_font = ImageFont.load_default()
+                try:
+                    self._emoji_font_status = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", 24
+                    )
+                except OSError:
+                    self._emoji_font_status = self._status_font
+            status_font = self._status_font
+            emoji_font_status = self._emoji_font_status
+            # Render status messages with mixed emoji + text by splitting each
+            # line into segments: emoji chars get NotoSansSymbols2, text gets DejaVu
+            # Word-wrap by character width using text font for measurement
             words = self.status_message.split(' ')
             lines = []
             current_line = ''
             for word in words:
                 test_line = f'{current_line} {word}'.strip() if current_line else word
+                # Measure width using text font (close enough for wrap)
                 bbox = status_font.getbbox(test_line)
                 if bbox[2] - bbox[0] > max_text_width and current_line:
                     lines.append(current_line)
@@ -967,11 +986,45 @@ class snarlingCreature:
             if current_line:
                 lines.append(current_line)
             y = banner_top
-            for line in lines:
+            for line_text in lines:
                 if y + 24 > banner_bottom:
                     break
-                self.draw.text((text_left, y), line, fill=(255, 255, 255), font=status_font)
+                self._render_mixed_line(self.draw, text_left, y, line_text, status_font, emoji_font_status, (255, 255, 255))
                 y += 24
+
+    def _is_emoji_char(self, ch):
+        """Check if a character should be rendered with the emoji font (SMP or special symbols)."""
+        return ord(ch) > 0x2000
+
+    def _strip_emoji(self, text):
+        """Remove emoji characters that DejaVu can't render. Used for notification/approval banners."""
+        return ''.join(ch for ch in text if ord(ch) <= 0x2000)
+
+    def _render_mixed_line(self, draw, x, y, text, text_font, emoji_font, fill):
+        """Render a line with emoji chars using emoji font and text using text font."""
+        segments = []
+        current = ''
+        current_is_emoji = None
+        for ch in text:
+            is_em = self._is_emoji_char(ch)
+            if current_is_emoji is None:
+                current_is_emoji = is_em
+                current = ch
+            elif is_em == current_is_emoji:
+                current += ch
+            else:
+                segments.append((current, current_is_emoji))
+                current = ch
+                current_is_emoji = is_em
+        if current:
+            segments.append((current, current_is_emoji))
+        cx = x
+        for seg_text, is_em in segments:
+            font = emoji_font if is_em else text_font
+            draw.text((cx, y), seg_text, fill=fill, font=font)
+            bbox = font.getbbox(seg_text)
+            cx += (bbox[2] - bbox[0])
+        return cx - x
 
     def show_status_summary(self):
         """Show detailed status summary"""
@@ -980,7 +1033,7 @@ class snarlingCreature:
 
     def trigger_heartbeat(self):
         """Trigger a heartbeat check"""
-        self.status_message = "❤️ Heartbeat OK"
+        self.status_message = "❤ Heartbeat OK"
         self.status_timer = 60
 
     def trigger_voice_input(self):
@@ -989,7 +1042,7 @@ class snarlingCreature:
         import subprocess
 
         self.state = STATE_LISTENING
-        self.status_message = "🎤 Listening..."
+        self.status_message = "🎙 Listening..."
         self.status_timer = 360  # Show for ~12 seconds
         self.led_timer = 10
 
@@ -1024,7 +1077,7 @@ class snarlingCreature:
 
                 # Show thinking state
                 self.state = STATE_PROCESSING
-                self.status_message = "🤔 Thinking..."
+                self.status_message = "⏱ Thinking..."
                 self.status_timer = 360
 
                 # Step 2: POST WAV path to plugin for transcription + injection
@@ -1081,12 +1134,12 @@ class snarlingCreature:
         
         if self.screen_asleep:
             # Entering sleep mode
-            self.status_message = "💤 Sleep mode"
+            self.status_message = "☽ Sleep mode"
             self.status_timer = 60  # 2 seconds at 30fps
             self.led_timer = 0  # Turn off LED immediately
         else:
             # Waking up
-            self.status_message = "☀️ Wake up"
+            self.status_message = "☀ Wake up"
             self.status_timer = 45  # 1.5 seconds at 30fps
             # Restore LED for current state
             self.led_timer = 10
@@ -1162,7 +1215,11 @@ class snarlingCreature:
         if present and self._last_absence_time is not None:
             absent_duration = time.time() - self._last_absence_time
             absent_str = self._format_duration(absent_duration)
-            self._last_absence_duration_sec = absent_duration
+            # Only update _last_absence_duration_sec with the REAL absence (>= 60s).
+            # Thermal flicker (1-5s) should NOT overwrite the meaningful absence duration
+            # that the presence_settled event needs for the consent cascade.
+            if absent_duration >= 60 or self._last_absence_duration_sec is None:
+                self._last_absence_duration_sec = absent_duration
         else:
             absent_str = None
             absent_duration_sec = None
@@ -1517,6 +1574,8 @@ class snarlingCreature:
 
     def _prepare_notify_banners(self, message, priority):
         """Build the alternating banners for a notification and set them on self."""
+        # Strip emoji characters that DejaVu can't render
+        message = self._strip_emoji(message)
         try:
             banner_header_font = ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
@@ -1777,7 +1836,9 @@ class snarlingCreature:
             action_text = "Approve?"
             desc_text = message
             print(f"[snarling] No ': ' found, full message as desc: '{message}'")
-        # Word-wrap each line to fit within pixel width, breaking at word boundaries
+        # Strip emoji characters that DejaVu can't render
+        action_text = self._strip_emoji(action_text)
+        desc_text = self._strip_emoji(desc_text)
         # Calculate usable width based on display dimensions and frame insets
         inner_inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
         text_left = inner_inset + 10
@@ -1910,13 +1971,14 @@ class snarlingCreature:
                 else:
                     # Normal button handling
                     if name == 'X':
-                        if self.state == STATE_SLEEPING:
-                            self.trigger_voice_input()
-                        else:
-                            # Voice input only available during sleeping state
+                        # Allow voice input in any normal state (processing, communicating, sleeping)
+                        # Wake bug means voice only works when agent is already active
+                        if self.state in (STATE_AWAITING_APPROVAL, STATE_NOTIFYING, STATE_LISTENING):
                             self.status_message = "💤 Let me sleep first"
                             self.status_timer = 120  # Show for ~4 seconds
-                            print(f"[snarling] X press blocked — state is {self.state}, not sleeping")
+                            print(f"[snarling] X press blocked — state is {self.state}")
+                        else:
+                            self.trigger_voice_input()
                     elif name == 'Y':
                         self.toggle_sleep_mode()
                     elif name == 'B':
