@@ -187,7 +187,7 @@ class snarlingCreature:
         self._notify_message = ''
         self._notify_start_time = 0
         self._notify_text_revealed = False
-        self._notify_feedback_sent = False  # Prevent double callback on A-then-B
+        self._notify_reveal_time = 0  # Seconds from notification start to reveal press
         self._notify_pre_state = STATE_SLEEPING  # state to return to after notification
         self._notify_showing_notify_face = False  # True when current face is a notification face
         self._notify_id = None           # notification_id from plugin
@@ -1473,11 +1473,11 @@ class snarlingCreature:
         except Exception as e:
             print(f"[snarling] Webhook call failed: {e}")
 
-    def forward_notification_feedback(self, revealed, time_to_reveal_sec, dismissed, timed_out=False, time_in_queue_sec=0):
+    def forward_notification_feedback(self, action, time_to_reveal_sec, time_in_queue_sec=0):
         """Send notification interaction feedback back to the gateway.
-        Mirrors forward_approval_response exactly: same gateway token, same auth, same WebSocket wake.
-        time_to_reveal_sec = display time only (from when notification appeared on screen)
-        time_in_queue_sec = time spent queued behind other notifications"""
+        action: 'accepted' (A press after reveal), 'rejected' (B press after reveal), or 'timed_out'
+        time_to_reveal_sec: seconds from notification appearing to reveal press (0 if timed out)
+        time_in_queue_sec: time spent queued behind other notifications"""
         notify_id = self._notify_id
         callback_url = self._notify_callback_url
         session_key = self._notify_session_key or 'agent:main:main'
@@ -1487,7 +1487,7 @@ class snarlingCreature:
             print(f"[snarling] No callback for notification (id={notify_id}, url={callback_url}) — skipping feedback")
             return
 
-        print(f"[snarling] Forwarding notification feedback for {notify_id}: revealed={revealed}, time_to_reveal={time_to_reveal_sec + time_in_queue_sec:.1f}s (display={time_to_reveal_sec:.1f}s + queue={time_in_queue_sec:.1f}s), dismissed={dismissed}, timed_out={timed_out} (sessionKey={session_key})")
+        print(f"[snarling] Forwarding notification feedback for {notify_id}: action={action}, time_to_reveal={time_to_reveal_sec + time_in_queue_sec:.1f}s (display={time_to_reveal_sec:.1f}s + queue={time_in_queue_sec:.1f}s) (sessionKey={session_key})")
         try:
             import requests as req_lib
             gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
@@ -1508,10 +1508,8 @@ class snarlingCreature:
 
             response_data = {
                 "notification_id": notify_id,
-                "revealed": revealed,
+                "action": action,  # 'accepted', 'rejected', or 'timed_out'
                 "time_to_reveal_sec": time_to_reveal_sec + time_in_queue_sec,  # total time from send to reveal
-                "dismissed": dismissed,
-                "timed_out": timed_out,
                 "secret": secret,
                 "sessionKey": session_key,
                 "present": present_at_feedback,
@@ -1741,7 +1739,7 @@ class snarlingCreature:
         self._notify_message = message
         self._notify_start_time = time.time()
         self._notify_text_revealed = False
-        self._notify_feedback_sent = False
+        self._notify_reveal_time = 0
         # Store feedback metadata from stack item
         self._notify_id = item.get('notification_id')
         self._notify_callback_url = item.get('callback_url')
@@ -1780,7 +1778,7 @@ class snarlingCreature:
             self._notify_message = message
             self._notify_start_time = time.time()
             self._notify_text_revealed = False
-            self._notify_feedback_sent = False
+            self._notify_reveal_time = 0
             # Store feedback metadata from stack item
             self._notify_id = item.get('notification_id')
             self._notify_callback_url = item.get('callback_url')
@@ -1805,7 +1803,7 @@ class snarlingCreature:
         self._notify_priority = 'normal'
         self._notify_message = ''
         self._notify_text_revealed = False
-        self._notify_feedback_sent = False
+        self._notify_reveal_time = 0
         self._notify_start_time = 0
         self._notify_pre_state = STATE_SLEEPING
         # Clean up notification feedback metadata
@@ -1962,25 +1960,24 @@ class snarlingCreature:
                         self.status_timer = 120
                         print(f"[snarling] X press blocked — awaiting approval")
                 elif self.state == STATE_NOTIFYING and self._notify_active:
-                    # Notification interaction
-                    if name == 'A':
-                        if not self._notify_text_revealed:
-                            # Reveal notification text
-                            self._notify_text_revealed = True
-                            self._notify_feedback_sent = True
-                            elapsed = time.time() - self._notify_start_time
-                            queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
-                            self.forward_notification_feedback(revealed=True, time_to_reveal_sec=elapsed, dismissed=False, time_in_queue_sec=queue_time)
-                            print(f"[snarling] Notification text revealed: {self._notify_message[:50]} (took {elapsed:.1f}s)")
-                        else:
-                            # Dismiss notification after text was revealed (feedback already sent on reveal)
-                            self._dismiss_notification()
-                    elif name == 'B':
-                        # Dismiss without revealing (snooze/dismiss)
-                        if not self._notify_feedback_sent:
-                            self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=True, time_in_queue_sec=self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0)
-                        else:
-                            print(f"[snarling] B press after reveal — feedback already sent, skipping")
+                    # Notification interaction: first press reveals, second press dismisses with sentiment
+                    # A or B press when not revealed → reveal the notification text
+                    # A press after reveal → accept (neutral dismiss)
+                    # B press after reveal → reject (negative dismiss)
+                    if name in ('A', 'B') and not self._notify_text_revealed:
+                        # First press: reveal notification text (either button works)
+                        self._notify_text_revealed = True
+                        self._notify_reveal_time = time.time() - self._notify_start_time
+                        print(f"[snarling] Notification revealed ({name} press): {self._notify_message[:50]} (took {self._notify_reveal_time:.1f}s)")
+                    elif name == 'A' and self._notify_text_revealed:
+                        # Second A press: accept (neutral dismiss)
+                        queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
+                        self.forward_notification_feedback(action='accepted', time_to_reveal_sec=self._notify_reveal_time, time_in_queue_sec=queue_time)
+                        self._dismiss_notification()
+                    elif name == 'B' and self._notify_text_revealed:
+                        # Second B press: reject (negative dismiss)
+                        queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
+                        self.forward_notification_feedback(action='rejected', time_to_reveal_sec=self._notify_reveal_time, time_in_queue_sec=queue_time)
                         self._dismiss_notification()
                     elif name == 'X':
                         self.status_message = "💤 Let me sleep first"
@@ -2048,12 +2045,8 @@ class snarlingCreature:
                 elapsed_notify = time.time() - self._notify_start_time
                 if elapsed_notify >= effective_duration:
                     print(f"[snarling] Low-priority notification timed out after {effective_duration}s")
-                    if not self._notify_feedback_sent:
-                        queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
-                        self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True, time_in_queue_sec=queue_time)
-                        self._notify_feedback_sent = True
-                    else:
-                        print(f"[snarling] Timeout feedback skipped — already sent")
+                    queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
+                    self.forward_notification_feedback(action='timed_out', time_to_reveal_sec=0, time_in_queue_sec=queue_time)
                     self._dismiss_notification()
 
         # Decrement status timer every frame (even when screen is asleep)
@@ -2288,6 +2281,7 @@ if FLASK_AVAILABLE and approval_app:
             "current_priority": creature_instance._notify_priority,
             "current_message": creature_instance._notify_message[:80] if creature_instance._notify_message else "",
             "text_revealed": creature_instance._notify_text_revealed,
+            "reveal_time": creature_instance._notify_reveal_time,
             "notification_id": creature_instance._notify_id,
             "callback_url": creature_instance._notify_callback_url,
             "duration": creature_instance._notify_duration,
