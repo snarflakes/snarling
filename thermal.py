@@ -29,7 +29,8 @@ PERSON_DELTA_HOT = 1.5    # °C above ambient when kitchen is hot (>30°C)
 MIN_PERSON_PIXELS = 15    # minimum blob size to qualify as a person
 MIN_BLOB_ASPECT = 0.25    # minimum width/height ratio (rejects tall narrow edge artifacts)
 EDGE_MARGIN = 2           # ignore outermost N rows/columns (MLX90640 edge artifacts)
-DEBOUNCE_FRAMES = 2       # consecutive frames required to confirm state change
+DEBOUNCE_FRAMES = 2       # (legacy — zone transitions unused, see PRESENCE_DEBOUNCE_FRAMES)
+PRESENCE_DEBOUNCE_FRAMES = 30  # ~7.5s at 4Hz — presence needs stability, zones stay responsive
 READ_INTERVAL = 0.25       # seconds between frames (~4 Hz)
 ERROR_BACKOFF = 5.0       # seconds to wait after a read error
 
@@ -398,10 +399,10 @@ class ThermalSensor:
         # Determine if we should flip presence
         new_present = current_present
         if raw_present and not current_present:
-            if self._debounce_present_count >= DEBOUNCE_FRAMES:
+            if self._debounce_present_count >= PRESENCE_DEBOUNCE_FRAMES:
                 new_present = True
         elif not raw_present and current_present:
-            if self._debounce_absent_count >= DEBOUNCE_FRAMES:
+            if self._debounce_absent_count >= PRESENCE_DEBOUNCE_FRAMES:
                 new_present = False
 
         # Determine proximity zone

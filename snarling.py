@@ -269,6 +269,11 @@ class snarlingCreature:
         # Track previous presence state for leaving-face detection
         self._prev_env_present = False
 
+        # ── Presence postprocessing state ─────────────────────────
+        self._approach_start_time = None       # timestamp when zone first hit 'approaching'
+        self._proximity_peak = 0.0             # highest proximity during current presence session
+        self._zone_flip_count = 0              # zone transitions during current presence session
+        self._presence_start_time = None       # timestamp when presence began (for dwell_sec)
         # ── End thermal integration ───────────────────────────────
 
 
@@ -1245,7 +1250,37 @@ class snarlingCreature:
         if present and self._last_absence_duration_sec is not None:
             event_data["absent_duration_sec"] = self._last_absence_duration_sec
 
+        # Presence postprocessing: track session stats for log enrichment
+        if present:
+            # Arrival — start new session
+            self._presence_start_time = time.time()
+            self._proximity_peak = 0.0
+            self._zone_flip_count = 0
+            self._approach_start_time = None  # will be set on first approaching zone
+        else:
+            # Departure — compute dwell_sec for log
+            dwell_sec = None
+            if self._presence_start_time is not None:
+                dwell_sec = time.time() - self._presence_start_time
+            # Log departure with postprocessed data
+            departure_log_entry = {
+                "ts": int(time.time()),
+                "type": "presence_change",
+                "p": 0,
+            }
+            if dwell_sec is not None:
+                departure_log_entry["dwell_sec"] = round(dwell_sec, 1)
+            if self._proximity_peak > 0:
+                departure_log_entry["prox_peak"] = round(self._proximity_peak, 2)
+            if self._zone_flip_count > 0:
+                departure_log_entry["zone_flips"] = self._zone_flip_count
+            self._log_presence_event_raw(departure_log_entry)
+
         self._post_environmental_event(event_data)
+
+        # Log arrival presence event to local file (departures logged above)
+        if present:
+            self._log_presence_event(event_data)
 
         if present:
             # Start settling timer — fire presence_settled after 60s of stable presence
@@ -1270,6 +1305,16 @@ class snarlingCreature:
         """Called by ThermalSensor when proximity zone changes.
         Runs in the thermal sensor's thread — must be thread-safe."""
         now = time.time()
+
+        # Presence postprocessing: track zone flips, proximity peak, approach time
+        if self._presence_start_time is not None:
+            # Only count zone flips during an active presence session
+            self._zone_flip_count += 1
+            if proximity > self._proximity_peak:
+                self._proximity_peak = proximity
+            if new_zone == "approaching" and self._approach_start_time is None:
+                self._approach_start_time = now
+
         with self._environmental_lock:
             self._environmental_state["proximity"] = proximity
             self._environmental_state["proximity_zone"] = new_zone
@@ -1345,18 +1390,68 @@ class snarlingCreature:
         except Exception:
             pass  # Silent fail — plugin may not be running
 
+    def _log_presence_event(self, event_data):
+        """Append a presence event as a single JSON line to /tmp/presence-log.jsonl.
+        Compact format for low token cost when the environmental agent reads it."""
+        try:
+            import json as _json
+            entry = {
+                "ts": int(event_data.get("timestamp", time.time())),
+                "type": event_data.get("type"),
+            }
+            if "present" in event_data:
+                entry["p"] = 1 if event_data["present"] else 0
+            if event_data.get("absent_duration_sec") is not None:
+                entry["abs"] = event_data["absent_duration_sec"]
+            with open("/tmp/presence-log.jsonl", "a") as f:
+                f.write(_json.dumps(entry, separators=(',', ':')) + "\n")
+        except Exception:
+            pass  # Silent fail — logging is best-effort
+
+    def _log_presence_event_raw(self, entry):
+        """Append a pre-built entry dict to /tmp/presence-log.jsonl.
+        Used for events with postprocessed fields like dwell_sec, prox_peak, etc."""
+        try:
+            import json as _json
+            with open("/tmp/presence-log.jsonl", "a") as f:
+                f.write(_json.dumps(entry, separators=(',', ':')) + "\n")
+        except Exception:
+            pass  # Silent fail — logging is best-effort
+
     def _on_presence_settled(self):
-        """Called 90 seconds after stable presence detected.
+        """Called 60 seconds after stable presence detected.
         Fires presence_settled event to the agent."""
         self._is_settled = True
         absent_sec = self._last_absence_duration_sec
         absent_str = self._format_duration(absent_sec) if absent_sec else None
-        self._post_environmental_event({
+
+        # Compute approach_sec from approach start time
+        approach_sec = None
+        if self._approach_start_time is not None:
+            approach_sec = round(time.time() - self._approach_start_time, 1)
+
+        settled_event = {
             "type": "presence_settled",
             "absent_duration": absent_str,
             "absent_duration_sec": absent_sec if absent_sec else 0,
             "timestamp": time.time(),
-        })
+        }
+        self._post_environmental_event(settled_event)
+
+        # Log settled event with postprocessed data
+        settled_log_entry = {
+            "ts": int(time.time()),
+            "type": "presence_settled",
+            "abs": absent_sec if absent_sec else 0,
+        }
+        if approach_sec is not None:
+            settled_log_entry["approach_sec"] = approach_sec
+        if self._proximity_peak > 0:
+            settled_log_entry["prox_peak"] = round(self._proximity_peak, 2)
+        if self._zone_flip_count > 0:
+            settled_log_entry["zone_flips"] = self._zone_flip_count
+        self._log_presence_event_raw(settled_log_entry)
+
         print(f"[snarling] Presence settled (absent for {absent_str or 'unknown'} before return)")
 
     # ── End thermal callbacks ───────────────────────────────────────
