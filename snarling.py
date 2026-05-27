@@ -232,6 +232,8 @@ class snarlingCreature:
             "present": False,
             "proximity": 0.0,
             "proximity_zone": "absent",
+            "display_zone": "absent",       # fast-debounced zone for face/LED (2-frame)
+            "display_proximity": 0.0,       # fast-debounced proximity for face/LED
             "source": "none",
             "last_change": None,
             "ambient_temp": None,
@@ -293,6 +295,7 @@ class snarlingCreature:
             self.thermal = ThermalSensor(
                 on_presence_change=self._on_thermal_presence_change,
                 on_proximity_change=self._on_thermal_proximity_change,
+                on_display_zone_change=self._on_thermal_display_zone_change,
             )
             self._thermal_available = True
             print("[snarling] Thermal sensor initialized (MLX90640)")
@@ -329,10 +332,12 @@ class snarlingCreature:
             return
 
         # Get current environmental state (thread-safe)
+        # Use confirmed presence (30-frame) for env_present (cascade stability)
+        # Use display proximity (2-frame) for LED reactivity
         try:
             with self._environmental_lock:
                 env_present = self._environmental_state["present"]
-                env_proximity = self._environmental_state["proximity"]
+                env_proximity = self._environmental_state.get("display_proximity", self._environmental_state["proximity"])
         except Exception:
             env_present = False
             env_proximity = 0.0
@@ -485,10 +490,10 @@ class snarlingCreature:
             if self._leaving_face_active:
                 faces = FaceExpressions.LEAVING
             elif self._thermal_available and self.state == STATE_SLEEPING:
-                # Proximity drives face when sleeping
+                # Proximity drives face when sleeping — use fast-debounced display zone
                 try:
                     with self._environmental_lock:
-                        zone = self._environmental_state["proximity_zone"]
+                        zone = self._environmental_state.get("display_zone", self._environmental_state["proximity_zone"])
                 except Exception:
                     zone = "absent"
 
@@ -526,7 +531,7 @@ class snarlingCreature:
         elif self._proximity_face_pending is None and self._thermal_available and self.state == STATE_SLEEPING:
             try:
                 with self._environmental_lock:
-                    zone = self._environmental_state["proximity_zone"]
+                    zone = self._environmental_state.get("display_zone", self._environmental_state["proximity_zone"])
             except Exception:
                 zone = "absent"
             # Proximity face cycling is handled by the face list rotation above;
@@ -1350,6 +1355,42 @@ class snarlingCreature:
 
         print(f"[snarling] Proximity change: {old_zone} -> {new_zone} ({proximity:.2f})")
 
+    def _on_thermal_display_zone_change(self, old_zone, new_zone, proximity, ambient_temp=None):
+        """Called by ThermalSensor when the fast-debounced display zone changes.
+        Runs in the thermal sensor's thread — must be thread-safe.
+        This is the fast path (2-frame debounce) for face and LED reactivity.
+        The confirmed (30-frame) path is _on_thermal_proximity_change."""
+        now = time.time()
+
+        # Update display zone/proximity in environmental state
+        with self._environmental_lock:
+            self._environmental_state["display_zone"] = new_zone
+            self._environmental_state["display_proximity"] = proximity
+
+        # Face and brightness transitions (same logic as confirmed path, but faster)
+        self.face_timer = 1.5  # Takes ~0.5s to reach 2.0 threshold
+
+        if new_zone == "present":
+            self._brightness_target = 1.0
+            self._proximity_face_pending = "(◠‿◠)"  # I see you
+            self._proximity_face_time = now  # instant
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.7
+        elif new_zone == "approaching":
+            self._brightness_target = 0.3 + proximity * 0.7
+            self._proximity_face_pending = "(⊙◡⊙)"  # Awareness
+            self._proximity_face_time = now  # instant
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.7
+        else:
+            self._brightness_target = 0.2
+            self._proximity_face_pending = "(≖◡◡≖)"  # Dozing
+            self._proximity_face_time = now
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.9
+
+        print(f"[snarling] Display zone change: {old_zone} -> {new_zone} ({proximity:.2f})")
+
     @staticmethod
     def _ease_out_cubic(t):
         """Ease-out cubic: fast start, slow settle. t in [0, 1]."""
@@ -2124,6 +2165,8 @@ class snarlingCreature:
                         self._environmental_state["present"] = False
                         self._environmental_state["proximity"] = 0.0
                         self._environmental_state["proximity_zone"] = "absent"
+                        self._environmental_state["display_zone"] = "absent"
+                        self._environmental_state["display_proximity"] = 0.0
                     self._brightness_target = 0.2
 
         # State is now set via direct /state API from the plugin (no polling)
@@ -2469,6 +2512,8 @@ if FLASK_AVAILABLE and approval_app:
             "present": env["present"],
             "proximity": round(env["proximity"], 3),
             "proximity_zone": env["proximity_zone"],
+            "display_zone": env.get("display_zone", env["proximity_zone"]),
+            "display_proximity": round(env.get("display_proximity", env["proximity"]), 3),
             "source": env["source"],
             "last_change": env["last_change"],
             "ambient_temp": round(ambient, 1) if ambient is not None else None,
