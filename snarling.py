@@ -1389,7 +1389,7 @@ class snarlingCreature:
             self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.9
 
-        print(f"[snarling] Display zone change: {old_zone} -> {new_zone} ({proximity:.2f})")
+        # Display zone changes are frequent (2-frame debounce) — skip journal logging
 
     @staticmethod
     def _ease_out_cubic(t):
