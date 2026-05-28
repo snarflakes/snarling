@@ -30,7 +30,7 @@ MIN_PERSON_PIXELS = 15    # minimum blob size to qualify as a person
 MIN_BLOB_ASPECT = 0.25    # minimum width/height ratio (rejects tall narrow edge artifacts)
 EDGE_MARGIN = 2           # ignore outermost N rows/columns (MLX90640 edge artifacts)
 DEBOUNCE_FRAMES = 2       # Fast debounce for display (face/LED) — ~0.5s at 4Hz
-PRESENCE_DEBOUNCE_FRAMES = 30  # ~7.5s at 4Hz — presence callbacks need stability
+PRESENCE_DEBOUNCE_FRAMES = 15  # ~3.75s at 4Hz — presence callbacks, logging, cascade
 READ_INTERVAL = 0.25       # seconds between frames (~4 Hz)
 ERROR_BACKOFF = 5.0       # seconds to wait after a read error
 
