@@ -168,6 +168,13 @@ class snarlingCreature:
 
         # Approval resolution counters
         self.approval_counts = {"approved": 0, "rejected": 0}
+
+        # Approval queue — multiple agents can queue approvals; only one is shown at a time
+        self._approval_queue = []  # list of {request_id, message, flow_id, callback_secret, session_key}
+        self._pending_approval_id = None
+        self._pending_flow_id = None
+        self._pending_approval_secret = None
+        self._pending_session_key = None
         self.status_message = ""
         self.status_timer = 0
 
@@ -1507,12 +1514,8 @@ class snarlingCreature:
             self.status_timer = 60
             # Forward approval response
             self.forward_approval_response(approved=True)
-            # Return to sleeping state after approval
-            self.state = STATE_SLEEPING
-            self.led_timer = 0
-            # If notifications were queued during approval, show them now
-            if self._notify_stack:
-                self._activate_next_notification()
+            # Activate next queued approval or return to normal
+            self._advance_after_approval()
 
     def reject_request(self):
         """Handle rejection button press (B button in approval state)"""
@@ -1524,12 +1527,32 @@ class snarlingCreature:
             self.status_timer = 60
             # Forward approval response
             self.forward_approval_response(approved=False)
-            # Return to sleeping state after rejection
+            # Activate next queued approval or return to normal
+            self._advance_after_approval()
+
+    def _advance_after_approval(self):
+        """After an approval is resolved (approved/rejected/timed out),
+        either show the next queued approval or return to normal state."""
+        # Clear current approval fields
+        self._pending_approval_id = None
+        self._pending_flow_id = None
+        self._pending_approval_secret = None
+        self._pending_session_key = None
+
+        if self._approval_queue:
+            # Pop the next queued approval and display it
+            next_entry = self._approval_queue.pop(0)
+            print(f"[snarling] Advancing to next queued approval: {next_entry.get('request_id')}")
+            self._activate_approval(next_entry)
+        elif self._notify_stack:
+            # No more approvals — show queued notifications
             self.state = STATE_SLEEPING
             self.led_timer = 0
-            # If notifications were queued during approval, show them now
-            if self._notify_stack:
-                self._activate_next_notification()
+            self._activate_next_notification()
+        else:
+            # Nothing queued — back to sleeping
+            self.state = STATE_SLEEPING
+            self.led_timer = 0
 
     def forward_approval_response(self, approved):
         request_id = getattr(self, '_pending_approval_id', 'unknown')
@@ -1967,12 +1990,38 @@ class snarlingCreature:
         print(f"[snarling] Notification dismissed, returning to {prev_state}")
 
     def set_awaiting_approval(self, request_id, message, flow_id=None, callback_secret=None, session_key=None):
-        """Set state to awaiting approval with request details"""
+        """Queue an approval request. If one is already active, queue behind it."""
+        entry = {
+            'request_id': request_id,
+            'message': message,
+            'flow_id': flow_id,
+            'callback_secret': callback_secret,
+            'session_key': session_key,
+        }
+
+        if self.state == STATE_AWAITING_APPROVAL:
+            # An approval is already on screen — queue this one
+            self._approval_queue.append(entry)
+            print(f"[snarling] Approval queued behind current (queue size: {len(self._approval_queue)}): {request_id}")
+            return
+
+        # No active approval — show this one immediately
+        self._activate_approval(entry)
+
+    def _activate_approval(self, entry):
+        """Display an approval from a queue entry."""
+        request_id = entry['request_id']
+        message = entry['message']
+        flow_id = entry.get('flow_id')
+        callback_secret = entry.get('callback_secret')
+        session_key = entry.get('session_key')
+
         self.state = STATE_AWAITING_APPROVAL
         self._pending_approval_id = request_id
         self._pending_flow_id = flow_id
         self._pending_approval_secret = callback_secret
         self._pending_session_key = session_key
+
         # The message arrives as "action: description" from the approval server
         # Split on first ": " to separate action from description
         if ": " in message and not message.startswith(" "):
@@ -1984,14 +2033,17 @@ class snarlingCreature:
             action_text = "Approve?"
             desc_text = message
             print(f"[snarling] No ': ' found, full message as desc: '{message}'")
+
         # Strip emoji characters that DejaVu can't render
         action_text = self._strip_emoji(action_text)
         desc_text = self._strip_emoji(desc_text)
+
         # Calculate usable width based on display dimensions and frame insets
         inner_inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
         text_left = inner_inset + 10
         text_right_calc = WIDTH - inner_inset - 30
         usable_width = text_right_calc - text_left
+
         def word_wrap(text, font, max_width):
             """Word-wrap text to fit within max_width pixels using the given font."""
             words = text.split()
@@ -2016,6 +2068,7 @@ class snarlingCreature:
             if current:
                 lines.append(current)
             return lines
+
         # Load fonts for pixel-accurate word wrapping
         try:
             wrap_header_font = ImageFont.truetype(
@@ -2027,6 +2080,7 @@ class snarlingCreature:
         except OSError:
             wrap_header_font = ImageFont.load_default()
             wrap_msg_font = wrap_header_font
+
         # Banner 1: Approve header + action name
         # Banner 2: message word-wrapped across two lines
         header = "Approve? A=Yes B=No"
@@ -2034,6 +2088,7 @@ class snarlingCreature:
         while len(action_lines) < 1:
             action_lines.append("")
         banner1 = [header, action_lines[0]]
+
         # Banner 2: first 3 lines of description word-wrapped
         desc_lines = word_wrap(desc_text, wrap_msg_font, max_width=usable_width)
         banner2_lines = desc_lines[:3]
@@ -2061,6 +2116,7 @@ class snarlingCreature:
         print(f"[snarling] Banner2: {banner2}")
         if banner3:
             print(f"[snarling] Banner3: {banner3}")
+
         self._approval_banners = [b for b in [banner1, banner2, banner3] if b is not None]
         self._approval_banner_index = 0
         self._approval_banner_timer = 0
@@ -2197,9 +2253,8 @@ class snarlingCreature:
                 self.status_timer = 60  # Show timeout message for 2 seconds
                 # Forward timeout as rejection
                 self.forward_approval_response(approved=False)
-                # Return to sleeping state
-                self.state = STATE_SLEEPING
-                self.led_timer = 0
+                # Activate next queued approval or return to normal
+                self._advance_after_approval()
 
     def draw_frame(self):
         """Render the frame using the new design system"""
@@ -2400,9 +2455,13 @@ if FLASK_AVAILABLE and approval_app:
         session_key = data.get('sessionKey')  # Session key for callback routing
         
         if creature_instance:
+            was_queued = creature_instance.state == STATE_AWAITING_APPROVAL
             creature_instance.set_awaiting_approval(request_id, message, flow_id, callback_secret=callback_secret, session_key=session_key)
             print(f"[snarling] Received approval alert: {request_id} (sessionKey={session_key})")
-            return jsonify({"status": "alert_displayed"})
+            if was_queued:
+                return jsonify({"status": "approval_queued", "queue_size": len(creature_instance._approval_queue)})
+            else:
+                return jsonify({"status": "alert_displayed"})
         else:
             return jsonify({"error": "snarling not initialized"}), 503
     
@@ -2412,6 +2471,18 @@ if FLASK_AVAILABLE and approval_app:
         global creature_instance
         if not creature_instance:
             return jsonify({"error": "snarling not initialized"}), 503
+
+        approval_info = None
+        if creature_instance.state == STATE_AWAITING_APPROVAL:
+            approval_info = {
+                "request_id": creature_instance._pending_approval_id,
+                "session_key": creature_instance._pending_session_key,
+                "queue_size": len(creature_instance._approval_queue),
+                "queue": [
+                    {"request_id": item.get('request_id'), "session_key": item.get('session_key')}
+                    for item in creature_instance._approval_queue
+                ]
+            }
 
         return jsonify({
             "active": creature_instance._notify_active,
@@ -2430,7 +2501,8 @@ if FLASK_AVAILABLE and approval_app:
                 {"priority": item["priority"], "message": item["message"][:50], "seq": item.get("_seq", 0),
                  "notification_id": item.get("notification_id"), "callback_url": item.get("callback_url")}
                 for item in creature_instance._notify_stack
-            ]
+            ],
+            "approval": approval_info
         })
 
     @approval_app.route('/health', methods=['GET'])
