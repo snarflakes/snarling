@@ -34,11 +34,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Approximate frame interval (seconds). Used by on_scheduled to count
-# frames until the next scheduled trigger. At 4 Hz, each frame ≈ 0.25 s.
-_FRAME_INTERVAL_SEC: float = 0.25
-
-
 @dataclass
 class TriggerEvent:
     """An event that wakes the agent."""
@@ -71,6 +66,10 @@ class TriggerScheduler:
     Trigger A: ``presence_settled`` — the user is now here and stable.
     Trigger B: ``observation_report`` — scheduled check (adaptive interval).
 
+    Scheduled triggers use **wall-clock time**, not frame counting.
+    Call :meth:`on_scheduled` whenever you want to check — it will only
+    fire when enough wall-clock time has elapsed since the last trigger.
+
     Typical day: 2–4 ``presence_settled`` + ~16–48 ``observation_report``
     ≈ 18–52 agent wakeups. Each wakeup carries world state + diff, not just
     ``present/absent``.
@@ -97,10 +96,10 @@ class TriggerScheduler:
         self._absence_start: Optional[float] = None  # epoch seconds
         self._was_present: bool = False
 
-        # Scheduled trigger state
+        # Scheduled trigger state (wall-clock based)
         self._last_wake: Optional[str] = None        # ISO timestamp
         self._last_world_state: Optional[dict] = None
-        self._scheduled_frame_counter: int = 0
+        self._last_scheduled_epoch: float = 0.0      # wall-clock time of last scheduled fire
         self._current_jitter: float = 0.0
 
         # 5-second dedup
@@ -180,22 +179,24 @@ class TriggerScheduler:
             self._last_wake = event.timestamp
             self._last_world_state = world_state
             self._last_trigger_epoch = now_epoch
+            self._last_scheduled_epoch = now_epoch  # reset scheduled timer too
 
             # Reset absence timer (they're present now)
             self._absence_start = None
 
             return event
 
-    # ── Trigger B: scheduled observation_report ────────────────────────
+    # ── Trigger B: scheduled observation_report ──────────────────────────
 
     def on_scheduled(self, world_state: dict, presence_active: bool) -> Optional[TriggerEvent]:
         """Trigger B: periodic scheduled observation.
 
-        Call this every frame. It counts frames and only fires when the
-        scheduled interval has elapsed.
+        Uses **wall-clock time** to determine when to fire, not frame counting.
+        Call this whenever you want to check — it will only fire when enough
+        time has elapsed since the last trigger.
 
-        Active interval (present): every 30 min ≈ 7200 frames at 4 Hz.
-        Inactive interval (absent): every 2–4 h ≈ 28800–57600 frames.
+        Active interval (present): every 30 min.
+        Inactive interval (absent): every 2–4 h.
 
         The inactive interval includes random jitter to avoid exact-period
         artifacts.
@@ -226,12 +227,9 @@ class TriggerScheduler:
                 self._last_wake = event.timestamp
                 self._last_world_state = world_state
                 self._last_trigger_epoch = now_epoch
-                self._scheduled_frame_counter = 0
+                self._last_scheduled_epoch = now_epoch
                 self._current_jitter = random.uniform(0, self._inactive_jitter)
                 return event
-
-            # Count frames since last trigger
-            self._scheduled_frame_counter += 1
 
             # Determine interval based on presence
             if presence_active:
@@ -239,12 +237,11 @@ class TriggerScheduler:
                 jitter_sec = 0.0
             else:
                 interval_sec = self._inactive_interval
-                # Only re-roll jitter when we reset the counter
                 jitter_sec = self._current_jitter
 
-            interval_frames = int((interval_sec + jitter_sec) / _FRAME_INTERVAL_SEC)
-
-            if self._scheduled_frame_counter < interval_frames:
+            # Check if enough wall-clock time has elapsed
+            elapsed = now_epoch - self._last_scheduled_epoch
+            if elapsed < (interval_sec + jitter_sec):
                 return None
 
             # 5-second dedup
@@ -268,7 +265,7 @@ class TriggerScheduler:
             self._last_wake = event.timestamp
             self._last_world_state = world_state
             self._last_trigger_epoch = now_epoch
-            self._scheduled_frame_counter = 0
+            self._last_scheduled_epoch = now_epoch
             self._current_jitter = random.uniform(0, self._inactive_jitter)
 
             return event

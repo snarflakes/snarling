@@ -290,7 +290,7 @@ class snarlingCreature:
         self._v2_world_state = None
         self._v2_trigger_scheduler = None
         self._v2_presence_observer = None
-        self._v2_scheduled_frame_counter = 0
+        self._v2_last_scheduled_check = 0.0  # epoch time of last on_scheduled() call
         try:
             from thermal_v2 import BlobTracker, WorldState, MeasurementExtractor, TriggerScheduler, PresenceObserver
             self._v2_tracker = BlobTracker()
@@ -1237,9 +1237,10 @@ class snarlingCreature:
             # 3. Update world state
             self._v2_world_state.update(measurements)
 
-            # 4. Check for scheduled trigger (throttled — every 100 frames ≈ 25s at 4Hz)
-            self._v2_scheduled_frame_counter += 1
-            if self._v2_scheduled_frame_counter % 100 == 0:
+            # 4. Check for scheduled trigger (throttled to every 30s)
+            now = time.time()
+            if now - self._v2_last_scheduled_check >= 30.0:
+                self._v2_last_scheduled_check = now
                 snapshot = self._v2_world_state.get_snapshot()
                 with self._environmental_lock:
                     presence_active = self._environmental_state.get("present", False)
