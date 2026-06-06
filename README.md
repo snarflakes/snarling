@@ -30,6 +30,7 @@ Instead of checking your phone or terminal to see if your agent is working, rest
 | **Notification** | `(◕‿‿◕)` | Agent has something to tell you |
 | **Proximity Aware** | `(≖◡◡≖)` | Someone is nearby while agent is sleeping (thermal sensor) |
 | **Leaving** | `(◡‿◡)` | Someone is walking away (thermal sensor, ~500ms) |
+| **Listening** | `(◕‿‿◕)` teal | Voice recording in progress (X button) |
 
 Each state has its own color, LED pattern, and animation — breathing blue when sleeping, pulsing melon when processing, flashing red when approval is needed.
 
@@ -58,7 +59,7 @@ When you press A, the notification text appears below a separator line in 2–3 
 |----------|-----------|-------------|---------|
 | **high** | Warm orange | 5/5 filled | None — stays until you interact |
 | **normal** | Yellow | 3/5 filled | None — stays until you interact |
-| **low** | Soft yellow | 1/5 filled | 300s — auto-dismisses, sends `timed_out` feedback |
+| **low** | Soft yellow | 1/5 filled | 28800s (8h) — auto-dismisses, sends `timed_out` feedback |
 
 No urgent or moderate notification should ever just disappear. Only low-priority notifications auto-dismiss.
 
@@ -92,16 +93,39 @@ Messages are word-wrapped across up to 3 banners that cycle every ~1.5 seconds:
 
 Short messages get 2 banners. Longer messages get all 3.
 
+## Voice Input (X Button)
+
+Snarling has a built-in microphone input flow via the **X button**. When pressed in normal state (not during an approval or notification), Snarling:
+
+1. Enters **listening** state (teal face, pulsing fill bars, `🎙 Listening...` message)
+2. Records 20 seconds of audio locally via `arecord` (no gateway dependency for recording)
+3. Switches to **processing** state (`⏱ Thinking...`) while POSTing the WAV path to the plugin's `/transcribe-and-reply` endpoint
+4. The plugin transcribes the audio and injects it as a voice system event into the agent's session
+5. On success, the plugin drives state transitions back to sleeping via the `/state` API
+6. On failure, Snarling falls back to sleeping
+
+The mic is checked at startup — if no audio input device is found (`plughw:3,0`), the X button shows `No mic found` instead of starting a recording. The WAV file is cleaned up after 60 seconds to give the plugin time to read it.
+
 ## Physical Approvals
 
 Snarling isn't just a display — it's an input device. When your agent needs approval for an action (deleting a file, sending a message, etc.), Snarling enters **awaiting approval** state and shows the request on screen.
 
-| Button | Normal Mode | Approval Mode |
-|--------|-------------|---------------|
-| **A** | Show status summary | ✅ **Approve** |
-| **B** | Trigger heartbeat | ❌ **Reject** |
-| **X** | Toggle sleep mode | — |
-| **Y** | Toggle mute mode | — |
+### Approval Queueing
+
+Multiple approvals no longer overwrite each other. If an approval is already on screen when a new one arrives, the new one is queued behind it (FIFO). When the current approval is resolved (approved or rejected), the next one in the queue is automatically displayed. Each queued approval carries its own `session_key` so the A/B callback always routes to the correct agent session, even when two different agents queue approvals simultaneously.
+
+This also means approvals take priority over notifications — if a notification is on screen when an approval arrives, the notification is bumped back to the notification stack. After the last approval is resolved, queued notifications reappear automatically.
+
+### Notification Priority Bumping
+
+Notifications are held in a priority-sorted stack (high → normal → low, newest-first within same priority). If a higher-priority notification arrives while a lower one is on screen and the user hasn't revealed it yet, the higher-priority one bumps the current notification back to the stack and takes over. Once resolved, the stack shows the next highest-priority notification.
+
+| Button | Normal Mode | Approval Mode | Notification Mode |
+|--------|-------------|---------------|-------------------|
+| **A** | Show status summary | ✅ **Approve** | Reveal text (1st press) → Accept (2nd press) |
+| **B** | (unused) | ❌ **Reject** | Dismiss without reading |
+| **X** | 🎙 **Record voice** | — | — |
+| **Y** | Toggle sleep mode | — | — |
 
 When you press A or B, Snarling POSTs the decision or feedback back to the OpenClaw gateway's `/approval-callback` or `/notification-callback` routes, then sends a WebSocket RPC wake so the agent picks up the result immediately (~5 seconds total latency).
 
@@ -119,28 +143,75 @@ Snarling can detect human presence using an [MLX90640 thermal camera](https://me
 The MLX90640 reads a 32×24 thermal grid at ~4 Hz. The `ThermalSensor` class (in `thermal.py`) runs as a daemon thread:
 
 1. **Frame processing**: Each frame computes ambient temperature, identifies warm blobs (≥3°C above ambient, ≥15 pixels, with aspect ratio filtering to reject oven heat plumes)
-2. **Debounce**: State changes require 2 consecutive frames to confirm (avoids flicker)
+2. **Dual debounce**: Fast path (2-frame) for face expressions and LED brightness, slow path (15-frame ≈ 3.75s) for presence callbacks and gateway events — avoids flicker on the display while keeping presence data stable
 3. **Proximity**: Calculated from blob size and warmth — larger, warmer blobs mean closer proximity
-4. **Callbacks**: `on_presence_change(was_absent, now_present, ambient_temp)` and `on_proximity_change(old_zone, new_zone, proximity, ambient_temp)` fire when confirmed state transitions happen
+4. **Callbacks**: `on_presence_change(was_absent, now_present, ambient_temp)` and `on_proximity_change(old_zone, new_zone, proximity, ambient_temp)` fire on the slow debounce path, `on_display_zone_change(old_zone, new_zone, proximity, ambient_temp)` fires on the fast path for immediate face/LED reactivity
+
+### Presence Session Tracking
+
+Each presence session (from arrival to departure) tracks:
+- **Dwell time**: how long someone was present
+- **Proximity peak**: highest proximity value during the session
+- **Zone flips**: number of proximity zone transitions (approaching ↔ present)
+- **Approach time**: seconds from first "approaching" zone to settled presence
+
+On departure, this data is logged to `/tmp/presence-log.jsonl` as a compact JSON line with `dwell_sec`, `prox_peak`, and `zone_flips` fields. On `presence_settled` (60s of stable presence), the approach time and zone flips are included.
 
 ### Presence Events to OpenClaw
 
-When someone arrives or leaves, Snarling POSTs an event to the OpenClaw gateway's `/environmental-event` route:
+Snarling sends two types of presence events to the OpenClaw gateway's `/environmental-event` route:
+
+#### `presence_change` (arrival/departure)
+
+Fired immediately when thermal detection confirms someone arrived or left:
 
 ```json
 {
   "type": "presence_change",
   "present": true,
   "absent_duration": "3h20m",
+  "absent_duration_sec": 12000,
   "timestamp": 1714588800
 }
 ```
 
 - `present`: `true` for arrival, `false` for departure
-- `absent_duration`: formatted string on return (e.g. `"45s"`, `"3m20s"`, `"2h15m"`), `null` on departure
+- `absent_duration`: human-readable string on return (e.g. `"45s"`, `"3m20s"`, `"2h15m"`), `null` on departure
+- `absent_duration_sec`: numeric seconds (only updated for absences ≥ 60s to avoid short-gap noise)
 - `timestamp`: Unix epoch when the change was detected
 
-These events are routed to the agent via `ENVIRONMENTAL_SESSION_KEY` (see Configuration below). Proximity zone changes are **not** sent to the gateway — they're used internally by Snarling for face expressions and LED brightness only.
+#### `presence_settled` (stable presence)
+
+Fired 60 seconds after confirmed arrival — means someone has been present long enough to be considered "settled":
+
+```json
+{
+  "type": "presence_settled",
+  "absent_duration": "2h15m",
+  "absent_duration_sec": 8100,
+  "timestamp": 1714588860
+}
+```
+
+This is the signal the agent uses for "someone is home and staying" — useful for proactive check-ins, greeting messages, or adjusting notification behavior.
+
+These events are routed to the agent via the OpenClaw Interaction Bridge plugin (see Configuration below). The plugin handles V1/V2 compatibility — `presence_settled` events without a `trigger_reason` field are treated as `observation_report` with `trigger_reason: "presence_settled"`.
+
+Proximity zone changes are **not** sent to the gateway — they're used internally by Snarling for face expressions and LED brightness only.
+
+### Presence Data Logging
+
+All presence events are logged to `/tmp/presence-log.jsonl` as compact JSON lines:
+
+```json
+{"ts":1714588800,"type":"presence_change","p":1,"abs":12000}
+{"ts":1714588860,"type":"presence_settled","abs":8100,"approach_sec":3.2,"prox_peak":0.85,"zone_flips":4}
+{"ts":1714589200,"type":"presence_change","p":0,"dwell_sec":665.0,"prox_peak":0.92,"zone_flips":7}
+```
+
+Fields: `ts` (epoch), `type`, `p` (1=present, 0=absent), `abs` (absent seconds), `dwell_sec` (departure only), `approach_sec` (settled only), `prox_peak`, `zone_flips`.
+
+This log enables the environmental agent to build rolling statistics over time — average dwell times, nocturnal patterns, peak proximity trends — without needing to parse full event payloads.
 
 ### Configuration
 
@@ -157,20 +228,24 @@ These events are routed to the agent via `ENVIRONMENTAL_SESSION_KEY` (see Config
 ## Architecture
 
 ```
-┌─────────────┐     HTTP POST      ┌──────────────┐   button press    ┌──────────────┐
-│  OpenClaw    │ ────────────────── │  Snarling     │ ───────────────► │  OpenClaw    │
+┌────────────┐     HTTP POST      ┌────────────┐   button press    ┌────────────┐
+│  OpenClaw    │ ───────────────── │  Snarling     │ ────────────────┠ │  OpenClaw    │
 │  (plugin)    │   /state (5000)   │  Display      │  webhook + WS    │  Gateway     │
-│              │ ────────────────── │  + Buttons    │  wake           │              │
+│              │ ───────────────── │  + Buttons    │  wake           │              │
 │              │   /approval/alert  │  + Thermal    │                  │              │
-│              │ ────────────────── │               │ ───────────────► │              │
+│              │ ───────────────── │  + Mic        │ ──────────────┠ │              │
 │              │   /approval/alert  │               │  /approval-cb    │              │
-│              │   (type: notify)   │               │ ───────────────► │              │
+│              │   (type: notify)  │               │ ──────────────┠ │              │
 │              │                    │               │  /notification-cb │              │
 │              │                    │               │                  │              │
-│              │                    │ ───────────────────────────────► │              │
+│              │                    │ ────────────────────────────────┠ │              │
 │              │                    │  /environmental-event            │              │
-│              │                    │  (presence_change events)        │              │
-└─────────────┘                    └──────────────┘                  └──────────────┘
+│              │                    │  (presence_change + settled)     │              │
+│              │                    │                                  │              │
+│              │                    │  X button press:                 │              │
+│              │                    │  🎙 arecord (local) ────────────┠ │              │
+│              │                    │  20s WAV → plugin transcribes    │  /transcribe  │
+└────────────┘                    └───────────┘                  └───────────┘
 ```
 
 **How it works:**
@@ -182,13 +257,14 @@ These events are routed to the agent via `ENVIRONMENTAL_SESSION_KEY` (see Config
 5. When you press A (approve/reveal) or B (reject/dismiss), Snarling POSTs the decision or feedback back to the OpenClaw gateway
 6. Snarling sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
 7. When the thermal sensor detects presence changes, Snarling POSTs to the gateway's `/environmental-event` route
+8. **X button** starts local audio recording (`arecord`, 20s), then POSTs the WAV path to the plugin's `/transcribe-and-reply` endpoint for transcription and agent injection
 
 ### Components
 
 | File | Purpose |
 |------|----------|
-| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server, thermal presence detection, environmental event posting |
-| `thermal.py` | ThermalSensor class — MLX90640 daemon thread, frame processing, blob detection, debounce logic, presence/proximity callbacks |
+| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server, voice input, approval/notification queueing, thermal callbacks, environmental event posting, presence session tracking, data logging |
+| `thermal.py` | ThermalSensor class — MLX90640 daemon thread, frame processing, blob detection, dual debounce (fast display / slow gateway), presence/proximity callbacks |
 
 ## Hardware
 
