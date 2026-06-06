@@ -321,6 +321,7 @@ class snarlingCreature:
                 on_presence_change=self._on_thermal_presence_change,
                 on_proximity_change=self._on_thermal_proximity_change,
                 on_display_zone_change=self._on_thermal_display_zone_change,
+                on_frame_data=self._on_thermal_frame_data,
             )
             self._thermal_available = True
             print("[snarling] Thermal sensor initialized (MLX90640)")
@@ -1215,6 +1216,17 @@ class snarlingCreature:
 
     # ── Thermal sensor callbacks ────────────────────────────────────
 
+    def _on_thermal_frame_data(self, blobs, best_person, ambient_temp):
+        """Called by ThermalSensor every frame at 4Hz with raw blob data.
+        This is the V2 pipeline entry point — no debounce, full rate.
+        Runs in the thermal sensor's thread — must be thread-safe."""
+        if self._v2_tracker is None:
+            return
+        try:
+            self._v2_process_frame(blobs, ambient_temp)
+        except Exception:
+            pass  # V2 never blocks V1
+
     def _v2_process_frame(self, blobs, ambient_temp):
         """Feed thermal frame data into V2 pipeline: tracker → measurements → world_state.
         Also checks for scheduled observation triggers.
@@ -1431,22 +1443,6 @@ class snarlingCreature:
             self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.9
 
-        # ── V2: feed proximity data into pipeline (confirmed path) ──
-        if self._v2_tracker is not None:
-            try:
-                ambient = ambient_temp or 22.0
-                raw_blob = {
-                    "centroid": (16, 12),  # approximate center of sensor
-                    "pixel_count": max(1, int(proximity * 60)),
-                    "temp_min": ambient + 1.0,
-                    "temp_max": ambient + 4.0,
-                    "temp_mean": ambient + 2.5,
-                }
-                blobs = [raw_blob] if new_zone != "absent" else []
-                self._v2_process_frame(blobs, ambient)
-            except Exception:
-                pass  # V2 never blocks V1
-
         print(f"[snarling] Proximity change: {old_zone} -> {new_zone} ({proximity:.2f})")
 
     def _on_thermal_display_zone_change(self, old_zone, new_zone, proximity, ambient_temp=None):
@@ -1482,22 +1478,6 @@ class snarlingCreature:
             self._proximity_face_time = now
             self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.9
-
-        # ── V2: feed display zone data into pipeline (fast path) ───
-        if self._v2_tracker is not None:
-            try:
-                ambient = ambient_temp or 22.0
-                raw_blob = {
-                    "centroid": (16, 12),
-                    "pixel_count": max(1, int(proximity * 60)),
-                    "temp_min": ambient + 1.0,
-                    "temp_max": ambient + 4.0,
-                    "temp_mean": ambient + 2.5,
-                }
-                blobs = [raw_blob] if new_zone != "absent" else []
-                self._v2_process_frame(blobs, ambient)
-            except Exception:
-                pass  # V2 never blocks V1
 
         # Display zone changes are frequent (2-frame debounce) — skip journal logging
 
