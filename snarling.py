@@ -1558,7 +1558,8 @@ class snarlingCreature:
 
     def _on_presence_settled(self):
         """Called 60 seconds after stable presence detected.
-        Fires presence_settled event to the agent."""
+        Fires observation_report with trigger_reason='presence_settled'.
+        V1 presence_settled event removed — V2 observation_report is the superset."""
         self._is_settled = True
         absent_sec = self._last_absence_duration_sec
         absent_str = self._format_duration(absent_sec) if absent_sec else None
@@ -1568,15 +1569,7 @@ class snarlingCreature:
         if self._approach_start_time is not None:
             approach_sec = round(time.time() - self._approach_start_time, 1)
 
-        settled_event = {
-            "type": "presence_settled",
-            "absent_duration": absent_str,
-            "absent_duration_sec": absent_sec if absent_sec else 0,
-            "timestamp": time.time(),
-        }
-        self._post_environmental_event(settled_event)
-
-        # Log settled event with postprocessed data
+        # Log settled event locally (for audit trail)
         settled_log_entry = {
             "ts": int(time.time()),
             "type": "presence_settled",
@@ -1590,7 +1583,9 @@ class snarlingCreature:
             settled_log_entry["zone_flips"] = self._zone_flip_count
         self._log_presence_event_raw(settled_log_entry)
 
-        # ── V2: fire observation_report on presence_settled ────────
+        # Fire V2 observation_report with trigger_reason='presence_settled'
+        # This replaces the V1 presence_settled event — it carries all the same
+        # data (absent_duration, absent_duration_sec) plus world_state and changes.
         if self._v2_trigger_scheduler is not None and self._v2_world_state is not None:
             try:
                 snapshot = self._v2_world_state.get_snapshot()
@@ -1609,7 +1604,7 @@ class snarlingCreature:
                     self._post_environmental_event(v2_event)
                     append_log(f"V2 observation_report (presence_settled): {len(event.world_state.get('sources', {}))} sources")
             except Exception as e:
-                print(f"[snarling] V2 presence_settled error: {e}")
+                append_log(f"V2 presence_settled error: {e}")
 
         print(f"[snarling] Presence settled (absent for {absent_str or 'unknown'} before return)")
 
