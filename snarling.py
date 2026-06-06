@@ -1224,8 +1224,8 @@ class snarlingCreature:
             return
         try:
             self._v2_process_frame(blobs, ambient_temp)
-        except Exception:
-            pass  # V2 never blocks V1
+        except Exception as e:
+            append_log(f"V2 frame data error: {e}")
 
     def _v2_process_frame(self, blobs, ambient_temp):
         """Feed thermal frame data into V2 pipeline: tracker → measurements → world_state.
@@ -1238,6 +1238,13 @@ class snarlingCreature:
         """
         if self._v2_tracker is None:
             return
+
+        # Log first 3 frames on startup to verify V2 pipeline is receiving data
+        if not hasattr(self, '_v2_frame_count'):
+            self._v2_frame_count = 0
+        self._v2_frame_count += 1
+        if self._v2_frame_count <= 3:
+            append_log(f"V2 frame #{self._v2_frame_count}: {len(blobs)} blobs, ambient={ambient_temp:.1f}")
 
         try:
             # 1. Track blobs
@@ -1269,7 +1276,7 @@ class snarlingCreature:
                         "timestamp": event.timestamp,
                     }
                     self._post_environmental_event(v2_event)
-                    print(f"[snarling] V2 observation_report (scheduled): {len(event.world_state.get('sources', {}))} sources")
+                    append_log(f"V2 observation_report (scheduled): {len(event.world_state.get('sources', {}))} sources")
         except Exception:
             pass  # V2 is additive — never let errors break V1
 
@@ -1600,7 +1607,7 @@ class snarlingCreature:
                         "timestamp": event.timestamp,
                     }
                     self._post_environmental_event(v2_event)
-                    print(f"[snarling] V2 observation_report (presence_settled): {len(event.world_state.get('sources', {}))} sources")
+                    append_log(f"V2 observation_report (presence_settled): {len(event.world_state.get('sources', {}))} sources")
             except Exception as e:
                 print(f"[snarling] V2 presence_settled error: {e}")
 
