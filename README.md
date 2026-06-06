@@ -59,7 +59,7 @@ When you press A, the notification text appears below a separator line in 2–3 
 |----------|-----------|-------------|---------|
 | **high** | Warm orange | 5/5 filled | None — stays until you interact |
 | **normal** | Yellow | 3/5 filled | None — stays until you interact |
-| **low** | Soft yellow | 1/5 filled | 300s — auto-dismisses, sends `timed_out` feedback |
+| **low** | Soft yellow | 1/5 filled | 28800s (8h) — auto-dismisses, sends `timed_out` feedback |
 
 No urgent or moderate notification should ever just disappear. Only low-priority notifications auto-dismiss.
 
