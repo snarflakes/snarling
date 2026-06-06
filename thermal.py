@@ -29,7 +29,8 @@ PERSON_DELTA_HOT = 1.5    # °C above ambient when kitchen is hot (>30°C)
 MIN_PERSON_PIXELS = 15    # minimum blob size to qualify as a person
 MIN_BLOB_ASPECT = 0.25    # minimum width/height ratio (rejects tall narrow edge artifacts)
 EDGE_MARGIN = 2           # ignore outermost N rows/columns (MLX90640 edge artifacts)
-DEBOUNCE_FRAMES = 2       # consecutive frames required to confirm state change
+DEBOUNCE_FRAMES = 2       # Fast debounce for display (face/LED) — ~0.5s at 4Hz
+PRESENCE_DEBOUNCE_FRAMES = 15  # ~3.75s at 4Hz — presence callbacks, logging, cascade
 READ_INTERVAL = 0.25       # seconds between frames (~4 Hz)
 ERROR_BACKOFF = 5.0       # seconds to wait after a read error
 
@@ -110,16 +111,19 @@ class ThermalSensor:
         last_update  – float, epoch timestamp of last successful frame
     """
 
-    def __init__(self, on_presence_change=None, on_proximity_change=None):
+    def __init__(self, on_presence_change=None, on_proximity_change=None, on_display_zone_change=None):
         """
         Args:
             on_presence_change: callback(was_absent: bool, now_present: bool, ambient_temp: float)
-                called when presence state changes
+                called when presence state changes (30-frame debounce)
             on_proximity_change: callback(old_zone: str, new_zone: str, proximity: float, ambient_temp: float)
-                called when proximity zone changes
+                called when confirmed proximity zone changes (30-frame debounce)
+            on_display_zone_change: callback(old_zone: str, new_zone: str, proximity: float, ambient_temp: float)
+                called on fast zone transitions (2-frame debounce) for face/LED responsiveness
         """
         self._on_presence_change = on_presence_change
         self._on_proximity_change = on_proximity_change
+        self._on_display_zone_change = on_display_zone_change
 
         # Shared state protected by lock
         self._lock = threading.Lock()
@@ -130,9 +134,16 @@ class ThermalSensor:
         self._zone = ZONE_ABSENT
         self._last_change = 0.0  # epoch of last state change
 
-        # Debounce counters (only accessed from reader thread)
+        # Confirmed presence debounce (30-frame, for callbacks/cascade)
         self._debounce_present_count = 0
         self._debounce_absent_count = 0
+
+        # Display debounce (2-frame, for face/LED responsiveness)
+        self._display_zone = ZONE_ABSENT
+        self._display_proximity = 0.0
+        self._display_present = False
+        self._display_present_count = 0
+        self._display_absent_count = 0
 
         # Thread control
         self._thread = None
@@ -177,6 +188,8 @@ class ThermalSensor:
                 "proximity": round(self._proximity, 2),
                 "ambient_temp": round(self._ambient_temp, 1),
                 "proximity_zone": self._zone,
+                "display_zone": self._display_zone,
+                "display_proximity": round(self._display_proximity, 2),
                 "last_change": self._last_change,
                 "last_update": self._last_update,
                 "sensor_active": self._sensor_ready,
@@ -384,7 +397,49 @@ class ThermalSensor:
     # ── Debounce logic ────────────────────────────────────────────
 
     def _apply_debounce(self, raw_present, raw_proximity, ambient, timestamp):
-        """Apply hysteresis/debouncing before committing state changes."""
+        """Apply hysteresis/debouncing before committing state changes.
+
+        Two paths:
+        - Display path (2-frame debounce): feeds face, LED, display_zone — responsive.
+        - Confirmed path (30-frame debounce): feeds presence callbacks, cascade, logging — stable.
+        """
+        # ── Display path: fast debounce for face/LED ──────────────────────
+        if raw_present:
+            self._display_present_count += 1
+            self._display_absent_count = 0
+        else:
+            self._display_absent_count += 1
+            self._display_present_count = 0
+
+        new_display_present = self._display_present
+        if raw_present and not self._display_present:
+            if self._display_present_count >= DEBOUNCE_FRAMES:
+                new_display_present = True
+        elif not raw_present and self._display_present:
+            if self._display_absent_count >= DEBOUNCE_FRAMES:
+                new_display_present = False
+
+        display_zone = _proximity_to_zone(raw_proximity if new_display_present else 0.0)
+        display_proximity = raw_proximity if new_display_present else 0.0
+
+        fire_display_zone = False
+        old_display_zone = None
+
+        with self._lock:
+            if display_zone != self._display_zone:
+                old_display_zone = self._display_zone
+                self._display_zone = display_zone
+                fire_display_zone = True
+            self._display_proximity = display_proximity
+            self._display_present = new_display_present
+
+        if fire_display_zone and self._on_display_zone_change and old_display_zone is not None:
+            try:
+                self._on_display_zone_change(old_display_zone, display_zone, display_proximity, ambient)
+            except Exception:
+                logger.debug("display_zone_change callback error", exc_info=True)
+
+        # ── Confirmed path: slow debounce for presence callbacks ──────────
         with self._lock:
             current_present = self._present
 
@@ -398,10 +453,10 @@ class ThermalSensor:
         # Determine if we should flip presence
         new_present = current_present
         if raw_present and not current_present:
-            if self._debounce_present_count >= DEBOUNCE_FRAMES:
+            if self._debounce_present_count >= PRESENCE_DEBOUNCE_FRAMES:
                 new_present = True
         elif not raw_present and current_present:
-            if self._debounce_absent_count >= DEBOUNCE_FRAMES:
+            if self._debounce_absent_count >= PRESENCE_DEBOUNCE_FRAMES:
                 new_present = False
 
         # Determine proximity zone
@@ -464,7 +519,7 @@ def _proximity_to_zone(proximity: float) -> str:
 
 # ── Convenience: try to create a sensor, return None if unavailable ──
 
-def create_thermal_sensor(on_presence_change=None, on_proximity_change=None):
+def create_thermal_sensor(on_presence_change=None, on_proximity_change=None, on_display_zone_change=None):
     """Factory that returns a ThermalSensor if hardware is available, else None.
 
     This is the preferred way for snarling to get a thermal sensor instance.
@@ -474,6 +529,7 @@ def create_thermal_sensor(on_presence_change=None, on_proximity_change=None):
     sensor = ThermalSensor(
         on_presence_change=on_presence_change,
         on_proximity_change=on_proximity_change,
+        on_display_zone_change=on_display_zone_change,
     )
     # _init_sensor is called inside start(), but we check early here too
     # so callers can decide whether to even bother.

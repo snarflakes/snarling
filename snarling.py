@@ -19,6 +19,14 @@ import threading
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 
+# Debug log file for tracking issues
+def append_log(msg):
+    try:
+        with open("/tmp/snarling-debug.log", "a") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    except:
+        pass
+
 # Import OpenClaw integration
 # OpenClaw polling client removed — state is now set via direct /state API from the plugin
 OPENCLAW_AVAILABLE = False
@@ -37,6 +45,7 @@ STATE_COMMUNICATING = "communicating"
 STATE_ERROR = "error"
 STATE_AWAITING_APPROVAL = "awaiting_approval"
 STATE_NOTIFYING = "notifying"
+STATE_LISTENING = "listening"
 
 # Color constants
 COLOR_BG = (26, 26, 46)       # Deep charcoal #1A1A2E
@@ -45,6 +54,7 @@ COLOR_SLEEP = (100, 150, 255)
 COLOR_PROCESS = (255, 168, 148)  # Light melon
 COLOR_COMM = (0, 255, 220)
 COLOR_ERROR = (255, 80, 80)
+COLOR_LISTEN = (0, 200, 180)  # Teal for listening state
 
 # New design system colors
 COLOR_BG_NEW = (26, 26, 46)        # Deep charcoal #1A1A2E
@@ -97,6 +107,9 @@ class FaceExpressions:
     # Awaiting approval faces - alert, watching
     AWAITING_APPROVAL = ['( ⚆_⚆)', '(☉_☉ )']
 
+    # Listening faces - attentive, ears perked
+    LISTENING = ['( ◠‿◠ )', '( ◕‿◕ )', '( ◑‿◑ )']
+
     # Notification faces - priority-based
     # High: urgent, demanding attention
     NOTIFY_HIGH = ['(☉_☉)', '(ಠ_ಠ)', '(⚠_⚠)']
@@ -124,6 +137,8 @@ class FaceExpressions:
             return cls.ERROR
         elif state == STATE_AWAITING_APPROVAL:
             return cls.AWAITING_APPROVAL
+        elif state == STATE_LISTENING:
+            return cls.LISTENING
         elif state == STATE_NOTIFYING:
             return cls.get_notify_faces(priority or 'normal')
         return cls.SLEEP
@@ -153,6 +168,13 @@ class snarlingCreature:
 
         # Approval resolution counters
         self.approval_counts = {"approved": 0, "rejected": 0}
+
+        # Approval queue — multiple agents can queue approvals; only one is shown at a time
+        self._approval_queue = []  # list of {request_id, message, flow_id, callback_secret, session_key}
+        self._pending_approval_id = None
+        self._pending_flow_id = None
+        self._pending_approval_secret = None
+        self._pending_session_key = None
         self.status_message = ""
         self.status_timer = 0
 
@@ -172,6 +194,7 @@ class snarlingCreature:
         self._notify_message = ''
         self._notify_start_time = 0
         self._notify_text_revealed = False
+        self._notify_reveal_time = 0  # Seconds from notification start to reveal press
         self._notify_pre_state = STATE_SLEEPING  # state to return to after notification
         self._notify_showing_notify_face = False  # True when current face is a notification face
         self._notify_id = None           # notification_id from plugin
@@ -197,7 +220,17 @@ class snarlingCreature:
         # LED timer for state change indication
         self.led_timer = 0
 
-        # ── Thermal sensor integration ──────────────────────────
+        # ── Mic availability ────────────────────────────────────
+        self._mic_available = False
+        try:
+            import subprocess as _sp
+            result = _sp.run(["arecord", "-l"], capture_output=True, text=True, timeout=3)
+            self._mic_available = "card 3" in result.stdout or "plughw:3,0" in result.stdout
+            print(f"[snarling] Mic check: {'found' if self._mic_available else 'not found'}")
+        except Exception as e:
+            print(f"[snarling] Mic check failed: {e}")
+
+        # ── Thermal sensor integration ──────────────────────────────────
         self.thermal = None
         self._thermal_available = False
 
@@ -206,6 +239,8 @@ class snarlingCreature:
             "present": False,
             "proximity": 0.0,
             "proximity_zone": "absent",
+            "display_zone": "absent",       # fast-debounced zone for face/LED (2-frame)
+            "display_proximity": 0.0,       # fast-debounced proximity for face/LED
             "source": "none",
             "last_change": None,
             "ambient_temp": None,
@@ -235,7 +270,7 @@ class snarlingCreature:
 
         # Timestamp when person last left (for absent_duration)
         self._last_absence_time = None
-        # Settling timer — fires presence_settled after 90s stable presence
+        # Settling timer — fires presence_settled after 60s stable presence
         self._settling_timer = None
         self._is_settled = False
         self._last_absence_duration_sec = None
@@ -243,6 +278,11 @@ class snarlingCreature:
         # Track previous presence state for leaving-face detection
         self._prev_env_present = False
 
+        # ── Presence postprocessing state ─────────────────────────
+        self._approach_start_time = None       # timestamp when zone first hit 'approaching'
+        self._proximity_peak = 0.0             # highest proximity during current presence session
+        self._zone_flip_count = 0              # zone transitions during current presence session
+        self._presence_start_time = None       # timestamp when presence began (for dwell_sec)
         # ── End thermal integration ───────────────────────────────
 
 
@@ -262,6 +302,7 @@ class snarlingCreature:
             self.thermal = ThermalSensor(
                 on_presence_change=self._on_thermal_presence_change,
                 on_proximity_change=self._on_thermal_proximity_change,
+                on_display_zone_change=self._on_thermal_display_zone_change,
             )
             self._thermal_available = True
             print("[snarling] Thermal sensor initialized (MLX90640)")
@@ -298,10 +339,12 @@ class snarlingCreature:
             return
 
         # Get current environmental state (thread-safe)
+        # Use confirmed presence (30-frame) for env_present (cascade stability)
+        # Use display proximity (2-frame) for LED reactivity
         try:
             with self._environmental_lock:
                 env_present = self._environmental_state["present"]
-                env_proximity = self._environmental_state["proximity"]
+                env_proximity = self._environmental_state.get("display_proximity", self._environmental_state["proximity"])
         except Exception:
             env_present = False
             env_proximity = 0.0
@@ -319,7 +362,7 @@ class snarlingCreature:
         proximity_brightness = max(0.15, min(self._brightness_current, 1.0))
 
         # Determine base LED color from state
-        if self.led_timer > 0 or self.state in (STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_AWAITING_APPROVAL, STATE_NOTIFYING):
+        if self.led_timer > 0 or self.state in (STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_AWAITING_APPROVAL, STATE_NOTIFYING, STATE_LISTENING):
             # Only clear presence glow block when actually leaving (proximity drops), not on state change
             # (block will clear naturally when env_present goes false in the presence callback)
             # State-driven LED colors
@@ -343,6 +386,11 @@ class snarlingCreature:
                 blink = 1.0 if int(self.breath_phase * 4) % 2 == 0 else 0.2
                 blink *= 0.7
                 base_r, base_g, base_b = blink, 0, 0
+            elif self.state == STATE_LISTENING:
+                # Teal pulse for listening
+                pulse = 0.4 + 0.3 * math.sin(self.breath_phase * 2)
+                pulse *= 0.7
+                base_r, base_g, base_b = 0, pulse * 0.8, pulse * 0.7
             elif self.state == STATE_NOTIFYING:
                 if self._notify_showing_notify_face:
                     led_color = NOTIFY_LED_COLORS.get(self._notify_priority, NOTIFY_LED_COLORS['normal'])
@@ -405,6 +453,7 @@ class snarlingCreature:
                     STATE_PROCESSING: COLOR_PROCESS,
                     STATE_COMMUNICATING: COLOR_COMM,
                     STATE_ERROR: COLOR_ERROR,
+                    STATE_LISTENING: COLOR_LISTEN,
                 }
                 return pre_colors.get(self._notify_pre_state, COLOR_SLEEP)
         colors = {
@@ -412,7 +461,8 @@ class snarlingCreature:
             STATE_PROCESSING: COLOR_PROCESS,
             STATE_COMMUNICATING: COLOR_COMM,
             STATE_ERROR: COLOR_ERROR,
-            STATE_AWAITING_APPROVAL: COLOR_ERROR  # Red for approval alert
+            STATE_AWAITING_APPROVAL: COLOR_ERROR,  # Red for approval alert
+            STATE_LISTENING: COLOR_LISTEN,  # Teal for listening
         }
         return colors.get(self.state, COLOR_SLEEP)
 
@@ -447,10 +497,10 @@ class snarlingCreature:
             if self._leaving_face_active:
                 faces = FaceExpressions.LEAVING
             elif self._thermal_available and self.state == STATE_SLEEPING:
-                # Proximity drives face when sleeping
+                # Proximity drives face when sleeping — use fast-debounced display zone
                 try:
                     with self._environmental_lock:
-                        zone = self._environmental_state["proximity_zone"]
+                        zone = self._environmental_state.get("display_zone", self._environmental_state["proximity_zone"])
                 except Exception:
                     zone = "absent"
 
@@ -488,7 +538,7 @@ class snarlingCreature:
         elif self._proximity_face_pending is None and self._thermal_available and self.state == STATE_SLEEPING:
             try:
                 with self._environmental_lock:
-                    zone = self._environmental_state["proximity_zone"]
+                    zone = self._environmental_state.get("display_zone", self._environmental_state["proximity_zone"])
             except Exception:
                 zone = "absent"
             # Proximity face cycling is handled by the face list rotation above;
@@ -515,6 +565,10 @@ class snarlingCreature:
             # Alert movement - quick jitter
             self.animation_offset_x = int(4 * math.sin(self.breath_phase * 6))
             self.animation_offset_y = int(2 * math.cos(self.breath_phase * 5))
+        elif self.state == STATE_LISTENING:
+            # Gentle sway, attentive
+            self.animation_offset_x = int(3 * math.sin(self.breath_phase * 2))
+            self.animation_offset_y = int(2 * math.sin(self.breath_phase * 1.5))
         elif self.state == STATE_NOTIFYING:
             if self._notify_priority == 'high':
                 # Quick jitter (like awaiting_approval)
@@ -681,6 +735,10 @@ class snarlingCreature:
         elif self.state == STATE_AWAITING_APPROVAL:
             fill_count = 5
             box_color = COLOR_ERROR  # Red
+        elif self.state == STATE_LISTENING:
+            # Pulsing fill: cycle 1-5 to show listening activity
+            fill_count = (self.face_index % 5) + 1
+            box_color = COLOR_LISTEN  # Teal
         elif self.state == STATE_NOTIFYING and self._notify_active:
             # Fill based on priority: high=5, normal=3, low=1
             priority_fill = {'high': 5, 'normal': 3, 'low': 1}
@@ -808,7 +866,13 @@ class snarlingCreature:
 
         # Mute indicator
         if self.mute:
-            self.draw.text((text_left, banner_bottom - 20), "🔇", fill=(150, 150, 150))
+            # Emoji rendered with NotoSansSymbols2 (DejaVu doesn't have emoji glyphs)
+            if not hasattr(self, '_emoji_font_small'):
+                try:
+                    self._emoji_font_small = ImageFont.truetype("/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", 14)
+                except OSError:
+                    self._emoji_font_small = ImageFont.load_default()
+            self.draw.text((text_left, banner_bottom - 20), "🔇", fill=(150, 150, 150), font=self._emoji_font_small)
 
         # State indicator (only show when no active banner)
         if not self._is_banner_active():
@@ -916,18 +980,31 @@ class snarlingCreature:
 
         # Status message overlay (non-approval, non-notification)
         elif self.status_timer > 0:
-            try:
-                status_font = ImageFont.truetype(
-                    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
-                )
-            except OSError:
-                status_font = ImageFont.load_default()
-            # Word-wrap text within the banner area
+            # Cache status and emoji fonts
+            if not hasattr(self, '_status_font'):
+                try:
+                    self._status_font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 24
+                    )
+                except OSError:
+                    self._status_font = ImageFont.load_default()
+                try:
+                    self._emoji_font_status = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf", 24
+                    )
+                except OSError:
+                    self._emoji_font_status = self._status_font
+            status_font = self._status_font
+            emoji_font_status = self._emoji_font_status
+            # Render status messages with mixed emoji + text by splitting each
+            # line into segments: emoji chars get NotoSansSymbols2, text gets DejaVu
+            # Word-wrap by character width using text font for measurement
             words = self.status_message.split(' ')
             lines = []
             current_line = ''
             for word in words:
                 test_line = f'{current_line} {word}'.strip() if current_line else word
+                # Measure width using text font (close enough for wrap)
                 bbox = status_font.getbbox(test_line)
                 if bbox[2] - bbox[0] > max_text_width and current_line:
                     lines.append(current_line)
@@ -937,11 +1014,45 @@ class snarlingCreature:
             if current_line:
                 lines.append(current_line)
             y = banner_top
-            for line in lines:
+            for line_text in lines:
                 if y + 24 > banner_bottom:
                     break
-                self.draw.text((text_left, y), line, fill=(255, 255, 255), font=status_font)
+                self._render_mixed_line(self.draw, text_left, y, line_text, status_font, emoji_font_status, (255, 255, 255))
                 y += 24
+
+    def _is_emoji_char(self, ch):
+        """Check if a character should be rendered with the emoji font (SMP or special symbols)."""
+        return ord(ch) > 0x2000
+
+    def _strip_emoji(self, text):
+        """Remove emoji characters that DejaVu can't render. Used for notification/approval banners."""
+        return ''.join(ch for ch in text if ord(ch) <= 0x2000)
+
+    def _render_mixed_line(self, draw, x, y, text, text_font, emoji_font, fill):
+        """Render a line with emoji chars using emoji font and text using text font."""
+        segments = []
+        current = ''
+        current_is_emoji = None
+        for ch in text:
+            is_em = self._is_emoji_char(ch)
+            if current_is_emoji is None:
+                current_is_emoji = is_em
+                current = ch
+            elif is_em == current_is_emoji:
+                current += ch
+            else:
+                segments.append((current, current_is_emoji))
+                current = ch
+                current_is_emoji = is_em
+        if current:
+            segments.append((current, current_is_emoji))
+        cx = x
+        for seg_text, is_em in segments:
+            font = emoji_font if is_em else text_font
+            draw.text((cx, y), seg_text, fill=fill, font=font)
+            bbox = font.getbbox(seg_text)
+            cx += (bbox[2] - bbox[0])
+        return cx - x
 
     def show_status_summary(self):
         """Show detailed status summary"""
@@ -950,8 +1061,100 @@ class snarlingCreature:
 
     def trigger_heartbeat(self):
         """Trigger a heartbeat check"""
-        self.status_message = "❤️ Heartbeat OK"
+        self.status_message = "❤ Heartbeat OK"
         self.status_timer = 60
+
+    def trigger_voice_input(self):
+        """Record audio locally, then POST WAV path to plugin for transcription"""
+        import threading
+        import subprocess
+
+        self.state = STATE_LISTENING
+        self.status_message = "🎙 Listening..."
+        self.status_timer = 360  # Show for ~12 seconds
+        self.led_timer = 10
+
+        def _record_and_post():
+            """Record audio in background thread, then POST path to plugin"""
+            try:
+                wav_path = f"/tmp/voice_recording.{int(time.time())}.wav"
+                duration = 20
+                device = "plughw:3,0"
+
+                # Step 1: Record immediately (no gateway dependency)
+                print(f"[snarling] Starting arecord: {duration}s from {device}")
+                try: append_log(f"arecord start {duration}s")
+                except: pass
+
+                result = subprocess.run(
+                    ["arecord", "-D", device, "-f", "S16_LE", "-c", "1", "-r", "24000", "-d", str(duration), wav_path],
+                    capture_output=True, timeout=duration + 5
+                )
+
+                if result.returncode != 0:
+                    print(f"[snarling] arecord failed: {result.stderr.decode()[:200]}")
+                    try: append_log(f"arecord failed: {result.stderr.decode()[:100]}")
+                    except: pass
+                    self.state = STATE_SLEEPING
+                    self.led_timer = 0
+                    return
+
+                print(f"[snarling] arecord complete: {wav_path}")
+                try: append_log(f"arecord complete, posting to plugin")
+                except: pass
+
+                # Show thinking state
+                self.state = STATE_PROCESSING
+                self.status_message = "⏱ Thinking..."
+                self.status_timer = 360
+
+                # Step 2: POST WAV path to plugin for transcription + injection
+                import requests as req_lib
+                gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+                url = "http://localhost:18789/transcribe-and-reply"
+                try:
+                    response = req_lib.post(
+                        url,
+                        json={"wav_path": wav_path},
+                        headers={"Authorization": f"Bearer {gateway_token}"},
+                        timeout=30,
+                    )
+                    print(f"[snarling] Transcribe response: {response.status_code} {response.text[:200]}")
+                    try: append_log(f"transcribe response: {response.status_code}")
+                    except: pass
+                    if response.status_code != 200:
+                        print(f"[snarling] Transcribe failed: {response.status_code}")
+                        self.state = STATE_SLEEPING
+                        self.led_timer = 0
+                    # On success, plugin handles state transitions via /state API
+                except Exception as e:
+                    print(f"[snarling] Transcribe POST error: {e}")
+                    try: append_log(f"transcribe error: {e}")
+                    except: pass
+                    self.state = STATE_SLEEPING
+                    self.led_timer = 0
+
+                # Don't clean up WAV — plugin will read it async.
+                # Clean up after a delay instead.
+                import threading
+                def _cleanup_later(path, delay=60):
+                    import time
+                    time.sleep(delay)
+                    try:
+                        os.unlink(path)
+                    except:
+                        pass
+                threading.Thread(target=_cleanup_later, args=(wav_path,), daemon=True).start()
+
+            except Exception as e:
+                print(f"[snarling] Voice input error: {e}")
+                try: append_log(f"voice error: {e}")
+                except: pass
+                self.state = STATE_SLEEPING
+                self.led_timer = 0
+
+        voice_thread = threading.Thread(target=_record_and_post, daemon=True)
+        voice_thread.start()
 
     def toggle_sleep_mode(self):
         """Toggle sleep mode for screen (replaces cycle_state)"""
@@ -959,12 +1162,12 @@ class snarlingCreature:
         
         if self.screen_asleep:
             # Entering sleep mode
-            self.status_message = "💤 Sleep mode"
+            self.status_message = "☽ Sleep mode"
             self.status_timer = 60  # 2 seconds at 30fps
             self.led_timer = 0  # Turn off LED immediately
         else:
             # Waking up
-            self.status_message = "☀️ Wake up"
+            self.status_message = "☀ Wake up"
             self.status_timer = 45  # 1.5 seconds at 30fps
             # Restore LED for current state
             self.led_timer = 10
@@ -1040,7 +1243,11 @@ class snarlingCreature:
         if present and self._last_absence_time is not None:
             absent_duration = time.time() - self._last_absence_time
             absent_str = self._format_duration(absent_duration)
-            self._last_absence_duration_sec = absent_duration
+            # Only update _last_absence_duration_sec with the REAL absence (>= 60s).
+            # Thermal flicker (1-5s) should NOT overwrite the meaningful absence duration
+            # that the presence_settled event needs for the consent cascade.
+            if absent_duration >= 60 or self._last_absence_duration_sec is None:
+                self._last_absence_duration_sec = absent_duration
         else:
             absent_str = None
             absent_duration_sec = None
@@ -1055,13 +1262,43 @@ class snarlingCreature:
         if present and self._last_absence_duration_sec is not None:
             event_data["absent_duration_sec"] = self._last_absence_duration_sec
 
+        # Presence postprocessing: track session stats for log enrichment
+        if present:
+            # Arrival — start new session
+            self._presence_start_time = time.time()
+            self._proximity_peak = 0.0
+            self._zone_flip_count = 0
+            self._approach_start_time = None  # will be set on first approaching zone
+        else:
+            # Departure — compute dwell_sec for log
+            dwell_sec = None
+            if self._presence_start_time is not None:
+                dwell_sec = time.time() - self._presence_start_time
+            # Log departure with postprocessed data
+            departure_log_entry = {
+                "ts": int(time.time()),
+                "type": "presence_change",
+                "p": 0,
+            }
+            if dwell_sec is not None:
+                departure_log_entry["dwell_sec"] = round(dwell_sec, 1)
+            if self._proximity_peak > 0:
+                departure_log_entry["prox_peak"] = round(self._proximity_peak, 2)
+            if self._zone_flip_count > 0:
+                departure_log_entry["zone_flips"] = self._zone_flip_count
+            self._log_presence_event_raw(departure_log_entry)
+
         self._post_environmental_event(event_data)
 
+        # Log arrival presence event to local file (departures logged above)
         if present:
-            # Start settling timer — fire presence_settled after 90s of stable presence
+            self._log_presence_event(event_data)
+
+        if present:
+            # Start settling timer — fire presence_settled after 60s of stable presence
             if self._settling_timer is not None:
                 self._settling_timer.cancel()
-            self._settling_timer = threading.Timer(90.0, self._on_presence_settled)
+            self._settling_timer = threading.Timer(60.0, self._on_presence_settled)
             self._settling_timer.daemon = True
             self._settling_timer.start()
         else:
@@ -1080,6 +1317,16 @@ class snarlingCreature:
         """Called by ThermalSensor when proximity zone changes.
         Runs in the thermal sensor's thread — must be thread-safe."""
         now = time.time()
+
+        # Presence postprocessing: track zone flips, proximity peak, approach time
+        if self._presence_start_time is not None:
+            # Only count zone flips during an active presence session
+            self._zone_flip_count += 1
+            if proximity > self._proximity_peak:
+                self._proximity_peak = proximity
+            if new_zone == "approaching" and self._approach_start_time is None:
+                self._approach_start_time = now
+
         with self._environmental_lock:
             self._environmental_state["proximity"] = proximity
             self._environmental_state["proximity_zone"] = new_zone
@@ -1114,6 +1361,42 @@ class snarlingCreature:
             self._brightness_ramp_duration = 0.9
 
         print(f"[snarling] Proximity change: {old_zone} -> {new_zone} ({proximity:.2f})")
+
+    def _on_thermal_display_zone_change(self, old_zone, new_zone, proximity, ambient_temp=None):
+        """Called by ThermalSensor when the fast-debounced display zone changes.
+        Runs in the thermal sensor's thread — must be thread-safe.
+        This is the fast path (2-frame debounce) for face and LED reactivity.
+        The confirmed (30-frame) path is _on_thermal_proximity_change."""
+        now = time.time()
+
+        # Update display zone/proximity in environmental state
+        with self._environmental_lock:
+            self._environmental_state["display_zone"] = new_zone
+            self._environmental_state["display_proximity"] = proximity
+
+        # Face and brightness transitions (same logic as confirmed path, but faster)
+        self.face_timer = 1.5  # Takes ~0.5s to reach 2.0 threshold
+
+        if new_zone == "present":
+            self._brightness_target = 1.0
+            self._proximity_face_pending = "(◠‿◠)"  # I see you
+            self._proximity_face_time = now  # instant
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.7
+        elif new_zone == "approaching":
+            self._brightness_target = 0.3 + proximity * 0.7
+            self._proximity_face_pending = "(⊙◡⊙)"  # Awareness
+            self._proximity_face_time = now  # instant
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.7
+        else:
+            self._brightness_target = 0.2
+            self._proximity_face_pending = "(≖◡◡≖)"  # Dozing
+            self._proximity_face_time = now
+            self._brightness_ramp_start = now
+            self._brightness_ramp_duration = 0.9
+
+        # Display zone changes are frequent (2-frame debounce) — skip journal logging
 
     @staticmethod
     def _ease_out_cubic(t):
@@ -1155,18 +1438,68 @@ class snarlingCreature:
         except Exception:
             pass  # Silent fail — plugin may not be running
 
+    def _log_presence_event(self, event_data):
+        """Append a presence event as a single JSON line to /tmp/presence-log.jsonl.
+        Compact format for low token cost when the environmental agent reads it."""
+        try:
+            import json as _json
+            entry = {
+                "ts": int(event_data.get("timestamp", time.time())),
+                "type": event_data.get("type"),
+            }
+            if "present" in event_data:
+                entry["p"] = 1 if event_data["present"] else 0
+            if event_data.get("absent_duration_sec") is not None:
+                entry["abs"] = event_data["absent_duration_sec"]
+            with open("/tmp/presence-log.jsonl", "a") as f:
+                f.write(_json.dumps(entry, separators=(',', ':')) + "\n")
+        except Exception:
+            pass  # Silent fail — logging is best-effort
+
+    def _log_presence_event_raw(self, entry):
+        """Append a pre-built entry dict to /tmp/presence-log.jsonl.
+        Used for events with postprocessed fields like dwell_sec, prox_peak, etc."""
+        try:
+            import json as _json
+            with open("/tmp/presence-log.jsonl", "a") as f:
+                f.write(_json.dumps(entry, separators=(',', ':')) + "\n")
+        except Exception:
+            pass  # Silent fail — logging is best-effort
+
     def _on_presence_settled(self):
-        """Called 90 seconds after stable presence detected.
+        """Called 60 seconds after stable presence detected.
         Fires presence_settled event to the agent."""
         self._is_settled = True
         absent_sec = self._last_absence_duration_sec
         absent_str = self._format_duration(absent_sec) if absent_sec else None
-        self._post_environmental_event({
+
+        # Compute approach_sec from approach start time
+        approach_sec = None
+        if self._approach_start_time is not None:
+            approach_sec = round(time.time() - self._approach_start_time, 1)
+
+        settled_event = {
             "type": "presence_settled",
             "absent_duration": absent_str,
             "absent_duration_sec": absent_sec if absent_sec else 0,
             "timestamp": time.time(),
-        })
+        }
+        self._post_environmental_event(settled_event)
+
+        # Log settled event with postprocessed data
+        settled_log_entry = {
+            "ts": int(time.time()),
+            "type": "presence_settled",
+            "abs": absent_sec if absent_sec else 0,
+        }
+        if approach_sec is not None:
+            settled_log_entry["approach_sec"] = approach_sec
+        if self._proximity_peak > 0:
+            settled_log_entry["prox_peak"] = round(self._proximity_peak, 2)
+        if self._zone_flip_count > 0:
+            settled_log_entry["zone_flips"] = self._zone_flip_count
+        self._log_presence_event_raw(settled_log_entry)
+
         print(f"[snarling] Presence settled (absent for {absent_str or 'unknown'} before return)")
 
     # ── End thermal callbacks ───────────────────────────────────────
@@ -1181,12 +1514,8 @@ class snarlingCreature:
             self.status_timer = 60
             # Forward approval response
             self.forward_approval_response(approved=True)
-            # Return to sleeping state after approval
-            self.state = STATE_SLEEPING
-            self.led_timer = 0
-            # If notifications were queued during approval, show them now
-            if self._notify_stack:
-                self._activate_next_notification()
+            # Activate next queued approval or return to normal
+            self._advance_after_approval()
 
     def reject_request(self):
         """Handle rejection button press (B button in approval state)"""
@@ -1198,12 +1527,32 @@ class snarlingCreature:
             self.status_timer = 60
             # Forward approval response
             self.forward_approval_response(approved=False)
-            # Return to sleeping state after rejection
+            # Activate next queued approval or return to normal
+            self._advance_after_approval()
+
+    def _advance_after_approval(self):
+        """After an approval is resolved (approved/rejected/timed out),
+        either show the next queued approval or return to normal state."""
+        # Clear current approval fields
+        self._pending_approval_id = None
+        self._pending_flow_id = None
+        self._pending_approval_secret = None
+        self._pending_session_key = None
+
+        if self._approval_queue:
+            # Pop the next queued approval and display it
+            next_entry = self._approval_queue.pop(0)
+            print(f"[snarling] Advancing to next queued approval: {next_entry.get('request_id')}")
+            self._activate_approval(next_entry)
+        elif self._notify_stack:
+            # No more approvals — show queued notifications
             self.state = STATE_SLEEPING
             self.led_timer = 0
-            # If notifications were queued during approval, show them now
-            if self._notify_stack:
-                self._activate_next_notification()
+            self._activate_next_notification()
+        else:
+            # Nothing queued — back to sleeping
+            self.state = STATE_SLEEPING
+            self.led_timer = 0
 
     def forward_approval_response(self, approved):
         request_id = getattr(self, '_pending_approval_id', 'unknown')
@@ -1283,11 +1632,11 @@ class snarlingCreature:
         except Exception as e:
             print(f"[snarling] Webhook call failed: {e}")
 
-    def forward_notification_feedback(self, revealed, time_to_reveal_sec, dismissed, timed_out=False, time_in_queue_sec=0):
+    def forward_notification_feedback(self, action, time_to_reveal_sec, time_in_queue_sec=0):
         """Send notification interaction feedback back to the gateway.
-        Mirrors forward_approval_response exactly: same gateway token, same auth, same WebSocket wake.
-        time_to_reveal_sec = display time only (from when notification appeared on screen)
-        time_in_queue_sec = time spent queued behind other notifications"""
+        action: 'accepted' (A press after reveal), 'rejected' (B press after reveal), or 'timed_out'
+        time_to_reveal_sec: seconds from notification appearing to reveal press (0 if timed out)
+        time_in_queue_sec: time spent queued behind other notifications"""
         notify_id = self._notify_id
         callback_url = self._notify_callback_url
         session_key = self._notify_session_key or 'agent:main:main'
@@ -1297,7 +1646,7 @@ class snarlingCreature:
             print(f"[snarling] No callback for notification (id={notify_id}, url={callback_url}) — skipping feedback")
             return
 
-        print(f"[snarling] Forwarding notification feedback for {notify_id}: revealed={revealed}, time_to_reveal={time_to_reveal_sec + time_in_queue_sec:.1f}s (display={time_to_reveal_sec:.1f}s + queue={time_in_queue_sec:.1f}s), dismissed={dismissed}, timed_out={timed_out} (sessionKey={session_key})")
+        print(f"[snarling] Forwarding notification feedback for {notify_id}: action={action}, time_to_reveal={time_to_reveal_sec + time_in_queue_sec:.1f}s (display={time_to_reveal_sec:.1f}s + queue={time_in_queue_sec:.1f}s) (sessionKey={session_key})")
         try:
             import requests as req_lib
             gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
@@ -1318,10 +1667,8 @@ class snarlingCreature:
 
             response_data = {
                 "notification_id": notify_id,
-                "revealed": revealed,
+                "action": action,  # 'accepted', 'rejected', or 'timed_out'
                 "time_to_reveal_sec": time_to_reveal_sec + time_in_queue_sec,  # total time from send to reveal
-                "dismissed": dismissed,
-                "timed_out": timed_out,
                 "secret": secret,
                 "sessionKey": session_key,
                 "present": present_at_feedback,
@@ -1395,6 +1742,8 @@ class snarlingCreature:
 
     def _prepare_notify_banners(self, message, priority):
         """Build the alternating banners for a notification and set them on self."""
+        # Strip emoji characters that DejaVu can't render
+        message = self._strip_emoji(message)
         try:
             banner_header_font = ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
@@ -1549,6 +1898,7 @@ class snarlingCreature:
         self._notify_message = message
         self._notify_start_time = time.time()
         self._notify_text_revealed = False
+        self._notify_reveal_time = 0
         # Store feedback metadata from stack item
         self._notify_id = item.get('notification_id')
         self._notify_callback_url = item.get('callback_url')
@@ -1587,6 +1937,7 @@ class snarlingCreature:
             self._notify_message = message
             self._notify_start_time = time.time()
             self._notify_text_revealed = False
+            self._notify_reveal_time = 0
             # Store feedback metadata from stack item
             self._notify_id = item.get('notification_id')
             self._notify_callback_url = item.get('callback_url')
@@ -1611,6 +1962,7 @@ class snarlingCreature:
         self._notify_priority = 'normal'
         self._notify_message = ''
         self._notify_text_revealed = False
+        self._notify_reveal_time = 0
         self._notify_start_time = 0
         self._notify_pre_state = STATE_SLEEPING
         # Clean up notification feedback metadata
@@ -1638,12 +1990,38 @@ class snarlingCreature:
         print(f"[snarling] Notification dismissed, returning to {prev_state}")
 
     def set_awaiting_approval(self, request_id, message, flow_id=None, callback_secret=None, session_key=None):
-        """Set state to awaiting approval with request details"""
+        """Queue an approval request. If one is already active, queue behind it."""
+        entry = {
+            'request_id': request_id,
+            'message': message,
+            'flow_id': flow_id,
+            'callback_secret': callback_secret,
+            'session_key': session_key,
+        }
+
+        if self.state == STATE_AWAITING_APPROVAL:
+            # An approval is already on screen — queue this one
+            self._approval_queue.append(entry)
+            print(f"[snarling] Approval queued behind current (queue size: {len(self._approval_queue)}): {request_id}")
+            return
+
+        # No active approval — show this one immediately
+        self._activate_approval(entry)
+
+    def _activate_approval(self, entry):
+        """Display an approval from a queue entry."""
+        request_id = entry['request_id']
+        message = entry['message']
+        flow_id = entry.get('flow_id')
+        callback_secret = entry.get('callback_secret')
+        session_key = entry.get('session_key')
+
         self.state = STATE_AWAITING_APPROVAL
         self._pending_approval_id = request_id
         self._pending_flow_id = flow_id
         self._pending_approval_secret = callback_secret
         self._pending_session_key = session_key
+
         # The message arrives as "action: description" from the approval server
         # Split on first ": " to separate action from description
         if ": " in message and not message.startswith(" "):
@@ -1655,12 +2033,17 @@ class snarlingCreature:
             action_text = "Approve?"
             desc_text = message
             print(f"[snarling] No ': ' found, full message as desc: '{message}'")
-        # Word-wrap each line to fit within pixel width, breaking at word boundaries
+
+        # Strip emoji characters that DejaVu can't render
+        action_text = self._strip_emoji(action_text)
+        desc_text = self._strip_emoji(desc_text)
+
         # Calculate usable width based on display dimensions and frame insets
         inner_inset = BORDER_MARGIN + INNER_FRAME_INSET + 1
         text_left = inner_inset + 10
         text_right_calc = WIDTH - inner_inset - 30
         usable_width = text_right_calc - text_left
+
         def word_wrap(text, font, max_width):
             """Word-wrap text to fit within max_width pixels using the given font."""
             words = text.split()
@@ -1685,6 +2068,7 @@ class snarlingCreature:
             if current:
                 lines.append(current)
             return lines
+
         # Load fonts for pixel-accurate word wrapping
         try:
             wrap_header_font = ImageFont.truetype(
@@ -1696,6 +2080,7 @@ class snarlingCreature:
         except OSError:
             wrap_header_font = ImageFont.load_default()
             wrap_msg_font = wrap_header_font
+
         # Banner 1: Approve header + action name
         # Banner 2: message word-wrapped across two lines
         header = "Approve? A=Yes B=No"
@@ -1703,6 +2088,7 @@ class snarlingCreature:
         while len(action_lines) < 1:
             action_lines.append("")
         banner1 = [header, action_lines[0]]
+
         # Banner 2: first 3 lines of description word-wrapped
         desc_lines = word_wrap(desc_text, wrap_msg_font, max_width=usable_width)
         banner2_lines = desc_lines[:3]
@@ -1730,6 +2116,7 @@ class snarlingCreature:
         print(f"[snarling] Banner2: {banner2}")
         if banner3:
             print(f"[snarling] Banner3: {banner3}")
+
         self._approval_banners = [b for b in [banner1, banner2, banner3] if b is not None]
         self._approval_banner_index = 0
         self._approval_banner_timer = 0
@@ -1751,38 +2138,62 @@ class snarlingCreature:
             pressed = self.display.read_button(button)
 
             if pressed and not self.button_pressed[name]:
+                print(f"[snarling] Button {name} PRESSED (state={self.state})")
+                try: append_log(f"Button {name} PRESSED (state={self.state})")
+                except: pass
                 # Button just pressed - check approval state first
                 if self.state == STATE_AWAITING_APPROVAL:
                     if name == 'A':
                         self.approve_request()
                     elif name == 'B':
                         self.reject_request()
-                    # X and Y don't do anything in approval state
+                    elif name == 'X':
+                        self.status_message = "💤 Let me sleep first"
+                        self.status_timer = 120
+                        print(f"[snarling] X press blocked — awaiting approval")
                 elif self.state == STATE_NOTIFYING and self._notify_active:
-                    # Notification interaction
-                    if name == 'A':
-                        if not self._notify_text_revealed:
-                            # Reveal notification text
-                            self._notify_text_revealed = True
-                            elapsed = time.time() - self._notify_start_time
-                            queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
-                            self.forward_notification_feedback(revealed=True, time_to_reveal_sec=elapsed, dismissed=False, time_in_queue_sec=queue_time)
-                            print(f"[snarling] Notification text revealed: {self._notify_message[:50]} (took {elapsed:.1f}s)")
-                        else:
-                            # Dismiss notification after text was revealed (feedback already sent on reveal)
-                            self._dismiss_notification()
-                    elif name == 'B':
-                        # Dismiss without revealing (snooze/dismiss)
-                        self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=True, time_in_queue_sec=self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0)
+                    # Notification interaction: first press reveals, second press dismisses with sentiment
+                    # A or B press when not revealed → reveal the notification text
+                    # A press after reveal → accept (neutral dismiss)
+                    # B press after reveal → reject (negative dismiss)
+                    if name in ('A', 'B') and not self._notify_text_revealed:
+                        # First press: reveal notification text (either button works)
+                        self._notify_text_revealed = True
+                        self._notify_reveal_time = time.time() - self._notify_start_time
+                        print(f"[snarling] Notification revealed ({name} press): {self._notify_message[:50]} (took {self._notify_reveal_time:.1f}s)")
+                    elif name == 'A' and self._notify_text_revealed:
+                        # Second A press: accept (neutral dismiss)
+                        queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
+                        self.forward_notification_feedback(action='accepted', time_to_reveal_sec=self._notify_reveal_time, time_in_queue_sec=queue_time)
                         self._dismiss_notification()
+                    elif name == 'B' and self._notify_text_revealed:
+                        # Second B press: reject (negative dismiss)
+                        queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
+                        self.forward_notification_feedback(action='rejected', time_to_reveal_sec=self._notify_reveal_time, time_in_queue_sec=queue_time)
+                        self._dismiss_notification()
+                    elif name == 'X':
+                        self.status_message = "💤 Let me sleep first"
+                        self.status_timer = 120
+                        print(f"[snarling] X press blocked — notification active")
                 else:
                     # Normal button handling
-                    if name == 'B':
-                        self.trigger_heartbeat()
-                    elif name == 'X':
-                        self.toggle_sleep_mode()
+                    if name == 'X':
+                        # Allow voice input in any normal state (processing, communicating, sleeping)
+                        # Wake bug means voice only works when agent is already active
+                        if self.state in (STATE_AWAITING_APPROVAL, STATE_NOTIFYING, STATE_LISTENING):
+                            self.status_message = "💤 Let me sleep first"
+                            self.status_timer = 120  # Show for ~4 seconds
+                            print(f"[snarling] X press blocked — state is {self.state}")
+                        elif not self._mic_available:
+                            self.status_message = "No mic found"
+                            self.status_timer = 120  # Show for ~4 seconds
+                            print(f"[snarling] X press blocked — no mic available")
+                        else:
+                            self.trigger_voice_input()
                     elif name == 'Y':
-                        self.toggle_mute()
+                        self.toggle_sleep_mode()
+                    elif name == 'B':
+                        pass  # B handled by approval/notification above
 
             self.button_pressed[name] = pressed
 
@@ -1810,6 +2221,8 @@ class snarlingCreature:
                         self._environmental_state["present"] = False
                         self._environmental_state["proximity"] = 0.0
                         self._environmental_state["proximity_zone"] = "absent"
+                        self._environmental_state["display_zone"] = "absent"
+                        self._environmental_state["display_proximity"] = 0.0
                     self._brightness_target = 0.2
 
         # State is now set via direct /state API from the plugin (no polling)
@@ -1827,7 +2240,7 @@ class snarlingCreature:
                 if elapsed_notify >= effective_duration:
                     print(f"[snarling] Low-priority notification timed out after {effective_duration}s")
                     queue_time = self._notify_start_time - self._notify_sent_time if self._notify_sent_time > 0 else 0
-                    self.forward_notification_feedback(revealed=False, time_to_reveal_sec=0, dismissed=False, timed_out=True, time_in_queue_sec=queue_time)
+                    self.forward_notification_feedback(action='timed_out', time_to_reveal_sec=0, time_in_queue_sec=queue_time)
                     self._dismiss_notification()
 
         # Decrement status timer every frame (even when screen is asleep)
@@ -1840,9 +2253,8 @@ class snarlingCreature:
                 self.status_timer = 60  # Show timeout message for 2 seconds
                 # Forward timeout as rejection
                 self.forward_approval_response(approved=False)
-                # Return to sleeping state
-                self.state = STATE_SLEEPING
-                self.led_timer = 0
+                # Activate next queued approval or return to normal
+                self._advance_after_approval()
 
     def draw_frame(self):
         """Render the frame using the new design system"""
@@ -2043,9 +2455,13 @@ if FLASK_AVAILABLE and approval_app:
         session_key = data.get('sessionKey')  # Session key for callback routing
         
         if creature_instance:
+            was_queued = creature_instance.state == STATE_AWAITING_APPROVAL
             creature_instance.set_awaiting_approval(request_id, message, flow_id, callback_secret=callback_secret, session_key=session_key)
             print(f"[snarling] Received approval alert: {request_id} (sessionKey={session_key})")
-            return jsonify({"status": "alert_displayed"})
+            if was_queued:
+                return jsonify({"status": "approval_queued", "queue_size": len(creature_instance._approval_queue)})
+            else:
+                return jsonify({"status": "alert_displayed"})
         else:
             return jsonify({"error": "snarling not initialized"}), 503
     
@@ -2056,12 +2472,25 @@ if FLASK_AVAILABLE and approval_app:
         if not creature_instance:
             return jsonify({"error": "snarling not initialized"}), 503
 
+        approval_info = None
+        if creature_instance.state == STATE_AWAITING_APPROVAL:
+            approval_info = {
+                "request_id": creature_instance._pending_approval_id,
+                "session_key": creature_instance._pending_session_key,
+                "queue_size": len(creature_instance._approval_queue),
+                "queue": [
+                    {"request_id": item.get('request_id'), "session_key": item.get('session_key')}
+                    for item in creature_instance._approval_queue
+                ]
+            }
+
         return jsonify({
             "active": creature_instance._notify_active,
             "state": creature_instance.state,
             "current_priority": creature_instance._notify_priority,
             "current_message": creature_instance._notify_message[:80] if creature_instance._notify_message else "",
             "text_revealed": creature_instance._notify_text_revealed,
+            "reveal_time": creature_instance._notify_reveal_time,
             "notification_id": creature_instance._notify_id,
             "callback_url": creature_instance._notify_callback_url,
             "duration": creature_instance._notify_duration,
@@ -2072,7 +2501,8 @@ if FLASK_AVAILABLE and approval_app:
                 {"priority": item["priority"], "message": item["message"][:50], "seq": item.get("_seq", 0),
                  "notification_id": item.get("notification_id"), "callback_url": item.get("callback_url")}
                 for item in creature_instance._notify_stack
-            ]
+            ],
+            "approval": approval_info
         })
 
     @approval_app.route('/health', methods=['GET'])
@@ -2098,7 +2528,7 @@ if FLASK_AVAILABLE and approval_app:
             return jsonify({"error": "No JSON data"}), 400
 
         state = data.get('state', '').lower()
-        valid_states = [STATE_SLEEPING, STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR]
+        valid_states = [STATE_SLEEPING, STATE_PROCESSING, STATE_COMMUNICATING, STATE_ERROR, STATE_LISTENING]
 
         if state not in valid_states:
             return jsonify({"error": f"Invalid state. Must be one of: {valid_states}"}), 400
@@ -2154,6 +2584,8 @@ if FLASK_AVAILABLE and approval_app:
             "present": env["present"],
             "proximity": round(env["proximity"], 3),
             "proximity_zone": env["proximity_zone"],
+            "display_zone": env.get("display_zone", env["proximity_zone"]),
+            "display_proximity": round(env.get("display_proximity", env["proximity"]), 3),
             "source": env["source"],
             "last_change": env["last_change"],
             "ambient_temp": round(ambient, 1) if ambient is not None else None,
