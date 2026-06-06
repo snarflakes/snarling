@@ -283,6 +283,24 @@ class snarlingCreature:
         self._proximity_peak = 0.0             # highest proximity during current presence session
         self._zone_flip_count = 0              # zone transitions during current presence session
         self._presence_start_time = None       # timestamp when presence began (for dwell_sec)
+
+        # ── Thermal V2 pipeline ───────────────────────────────────────────
+        self._v2_tracker = None
+        self._v2_measurement_extractor = None
+        self._v2_world_state = None
+        self._v2_trigger_scheduler = None
+        self._v2_presence_observer = None
+        self._v2_scheduled_frame_counter = 0
+        try:
+            from thermal_v2 import BlobTracker, WorldState, MeasurementExtractor, TriggerScheduler, PresenceObserver
+            self._v2_tracker = BlobTracker()
+            self._v2_measurement_extractor = MeasurementExtractor()
+            self._v2_world_state = WorldState()
+            self._v2_trigger_scheduler = TriggerScheduler()
+            self._v2_presence_observer = PresenceObserver()
+            print("[snarling] Thermal V2 pipeline initialized")
+        except Exception as e:
+            print(f"[snarling] Thermal V2 pipeline unavailable: {e}")
         # ── End thermal integration ───────────────────────────────
 
 
@@ -1197,6 +1215,51 @@ class snarlingCreature:
 
     # ── Thermal sensor callbacks ────────────────────────────────────
 
+    def _v2_process_frame(self, blobs, ambient_temp):
+        """Feed thermal frame data into V2 pipeline: tracker → measurements → world_state.
+        Also checks for scheduled observation triggers.
+        Called from the thermal sensor thread — must be thread-safe.
+
+        Args:
+            blobs: list of dicts with keys: centroid, pixel_count, temp_min, temp_max, temp_mean
+            ambient_temp: current ambient temperature from thermal sensor
+        """
+        if self._v2_tracker is None:
+            return
+
+        try:
+            # 1. Track blobs
+            tracked = self._v2_tracker.update(blobs)
+
+            # 2. Extract measurements
+            measurements = self._v2_measurement_extractor.extract(tracked)
+
+            # 3. Update world state
+            self._v2_world_state.update(measurements)
+
+            # 4. Check for scheduled trigger (throttled — every 100 frames ≈ 25s at 4Hz)
+            self._v2_scheduled_frame_counter += 1
+            if self._v2_scheduled_frame_counter % 100 == 0:
+                snapshot = self._v2_world_state.get_snapshot()
+                with self._environmental_lock:
+                    presence_active = self._environmental_state.get("present", False)
+                event = self._v2_trigger_scheduler.on_scheduled(snapshot, presence_active=presence_active)
+                if event is not None:
+                    v2_event = {
+                        "type": "observation_report",
+                        "trigger_reason": "scheduled",
+                        "present": event.present,
+                        "absent_duration": event.absent_duration,
+                        "absent_duration_sec": event.absent_duration_sec,
+                        "world_state": event.world_state,
+                        "changes_since_last": event.changes_since_last,
+                        "timestamp": event.timestamp,
+                    }
+                    self._post_environmental_event(v2_event)
+                    print(f"[snarling] V2 observation_report (scheduled): {len(event.world_state.get('sources', {}))} sources")
+        except Exception:
+            pass  # V2 is additive — never let errors break V1
+
     def _on_thermal_presence_change(self, absent, present, ambient_temp=None):
         """Callback from thermal sensor when presence state changes.
         Runs in the thermal sensor's thread — must be thread-safe."""
@@ -1238,6 +1301,13 @@ class snarlingCreature:
             self._brightness_ramp_duration = 0.9  # Slower fade-out
             # Clear the LED block so next presence starts fresh
             self._led_block_presence_glow = False
+
+        # ── V2: notify trigger scheduler of presence change ────────
+        if self._v2_trigger_scheduler is not None:
+            try:
+                self._v2_trigger_scheduler.on_presence_change(present)
+            except Exception:
+                pass  # V2 never blocks V1
 
         # Post presence change event to OpenClaw plugin
         if present and self._last_absence_time is not None:
@@ -1360,6 +1430,22 @@ class snarlingCreature:
             self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.9
 
+        # ── V2: feed proximity data into pipeline (confirmed path) ──
+        if self._v2_tracker is not None:
+            try:
+                ambient = ambient_temp or 22.0
+                raw_blob = {
+                    "centroid": (16, 12),  # approximate center of sensor
+                    "pixel_count": max(1, int(proximity * 60)),
+                    "temp_min": ambient + 1.0,
+                    "temp_max": ambient + 4.0,
+                    "temp_mean": ambient + 2.5,
+                }
+                blobs = [raw_blob] if new_zone != "absent" else []
+                self._v2_process_frame(blobs, ambient)
+            except Exception:
+                pass  # V2 never blocks V1
+
         print(f"[snarling] Proximity change: {old_zone} -> {new_zone} ({proximity:.2f})")
 
     def _on_thermal_display_zone_change(self, old_zone, new_zone, proximity, ambient_temp=None):
@@ -1395,6 +1481,22 @@ class snarlingCreature:
             self._proximity_face_time = now
             self._brightness_ramp_start = now
             self._brightness_ramp_duration = 0.9
+
+        # ── V2: feed display zone data into pipeline (fast path) ───
+        if self._v2_tracker is not None:
+            try:
+                ambient = ambient_temp or 22.0
+                raw_blob = {
+                    "centroid": (16, 12),
+                    "pixel_count": max(1, int(proximity * 60)),
+                    "temp_min": ambient + 1.0,
+                    "temp_max": ambient + 4.0,
+                    "temp_mean": ambient + 2.5,
+                }
+                blobs = [raw_blob] if new_zone != "absent" else []
+                self._v2_process_frame(blobs, ambient)
+            except Exception:
+                pass  # V2 never blocks V1
 
         # Display zone changes are frequent (2-frame debounce) — skip journal logging
 
@@ -1499,6 +1601,27 @@ class snarlingCreature:
         if self._zone_flip_count > 0:
             settled_log_entry["zone_flips"] = self._zone_flip_count
         self._log_presence_event_raw(settled_log_entry)
+
+        # ── V2: fire observation_report on presence_settled ────────
+        if self._v2_trigger_scheduler is not None and self._v2_world_state is not None:
+            try:
+                snapshot = self._v2_world_state.get_snapshot()
+                event = self._v2_trigger_scheduler.on_presence_settled(snapshot)
+                if event is not None:
+                    v2_event = {
+                        "type": "observation_report",
+                        "trigger_reason": "presence_settled",
+                        "present": True,
+                        "absent_duration": event.absent_duration,
+                        "absent_duration_sec": event.absent_duration_sec,
+                        "world_state": event.world_state,
+                        "changes_since_last": event.changes_since_last,
+                        "timestamp": event.timestamp,
+                    }
+                    self._post_environmental_event(v2_event)
+                    print(f"[snarling] V2 observation_report (presence_settled): {len(event.world_state.get('sources', {}))} sources")
+            except Exception as e:
+                print(f"[snarling] V2 presence_settled error: {e}")
 
         print(f"[snarling] Presence settled (absent for {absent_str or 'unknown'} before return)")
 
