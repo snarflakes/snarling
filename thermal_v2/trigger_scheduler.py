@@ -8,6 +8,9 @@ Only two triggers wake the agent:
 
 2. **observation_report** — periodic scheduled check.
    Active (present): every 30 min.  Inactive (absent): every 2–4 h.
+   After a departure, one grace-period observation fires at the active interval
+   before switching to inactive — so the environmental agent catches the
+   absence promptly instead of freezing for hours.
 
 All other thermal events (source appeared, disappeared, measurement changed)
 accumulate in the world state without waking the agent.
@@ -96,6 +99,12 @@ class TriggerScheduler:
         self._absence_start: Optional[float] = None  # epoch seconds
         self._was_present: bool = False
 
+        # Grace period: after departure, fire one more active-speed observation
+        # before switching to inactive interval. This ensures the environmental
+        # agent gets a timely present=false observation instead of freezing for
+        # 2–4 hours.
+        self._grace_observations_remaining: int = 0
+
         # Scheduled trigger state (wall-clock based)
         self._last_wake: Optional[str] = None        # ISO timestamp
         self._last_world_state: Optional[dict] = None
@@ -121,10 +130,12 @@ class TriggerScheduler:
                 # Transition: absent → present
                 self._was_present = True
                 # absence_start is kept so we can compute how long they were gone
+                self._grace_observations_remaining = 0  # no grace needed on arrival
             elif not present and self._was_present:
                 # Transition: present → absent — start the absence timer
                 self._was_present = False
                 self._absence_start = time.time()
+                self._grace_observations_remaining = 1  # one more active-speed check
             # If state hasn't changed, do nothing
 
     def get_absent_duration(self) -> tuple:
@@ -231,10 +242,16 @@ class TriggerScheduler:
                 self._current_jitter = random.uniform(0, self._inactive_jitter)
                 return event
 
-            # Determine interval based on presence
+            # Determine interval based on presence and grace period
             if presence_active:
                 interval_sec = self._active_interval
                 jitter_sec = 0.0
+            elif self._grace_observations_remaining > 0:
+                # Grace period: use active interval for one more cycle after departure
+                # so the environmental agent catches the absence promptly
+                interval_sec = self._active_interval
+                jitter_sec = 0.0
+                self._grace_observations_remaining -= 1
             else:
                 interval_sec = self._inactive_interval
                 jitter_sec = self._current_jitter
