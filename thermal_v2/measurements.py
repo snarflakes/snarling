@@ -20,7 +20,12 @@ from typing import Dict, List, Optional, Tuple
 
 @dataclass
 class SourceMeasurements:
-    """Condensed measurements for one source (tracked blob)."""
+    """Condensed measurements for one source (tracked blob).
+
+    All fields are raw measurements, not interpretations.
+    Derived metrics (variance, stability, etc.) are computed downstream
+    from the history fields, never stored directly.
+    """
 
     source_id: str                          # e.g. "s_1"
     peak_temp: float                        # max temperature observed (°C)
@@ -29,6 +34,15 @@ class SourceMeasurements:
     centroid_drift_px_per_frame: float       # average centroid movement between frames (px/frame)
     age_sec: float                          # seconds since first observation
     observation_count: int                  # number of frames this source has been seen
+    # Shape measurements — raw, not interpreted
+    width: float = 0.0                     # bounding box width in pixels
+    height: float = 0.0                    # bounding box height in pixels
+    area_pixels: int = 0                   # pixel count from flood fill
+    aspect_ratio: float = 1.0             # width / height — raw measurement
+    # Shape history — raw observations over time, for downstream derivation
+    aspect_ratio_history: list = field(default_factory=list)  # last N aspect_ratios
+    width_history: list = field(default_factory=list)           # last N widths
+    height_history: list = field(default_factory=list)          # last N heights
 
 
 # Time constant: 4 Hz frame rate
@@ -157,6 +171,17 @@ class MeasurementExtractor:
             # Age in seconds
             age_sec = round(now - self._first_seen[sid], 1)
 
+            # --- Shape measurements ----------------------------------------
+            # Raw measurements from TrackedBlob, no interpretation
+            width = blob.width
+            height = blob.height
+            area_pixels = blob.area_pixels
+            aspect_ratio = blob.aspect_ratio
+            # Shape histories come from TrackedBlob (tracked per-frame there)
+            aspect_ratio_history = list(blob.aspect_ratio_history[-30:])  # last ~7.5s
+            width_history = list(blob.width_history[-30:])
+            height_history = list(blob.height_history[-30:])
+
             results.append(SourceMeasurements(
                 source_id=sid,
                 peak_temp=round(peak_temp, 2),
@@ -165,6 +190,13 @@ class MeasurementExtractor:
                 centroid_drift_px_per_frame=centroid_drift_px_per_frame,
                 age_sec=age_sec,
                 observation_count=self._obs_count[sid],
+                width=width,
+                height=height,
+                area_pixels=area_pixels,
+                aspect_ratio=aspect_ratio,
+                aspect_ratio_history=aspect_ratio_history,
+                width_history=width_history,
+                height_history=height_history,
             ))
 
         # Clean up sources that are no longer tracked

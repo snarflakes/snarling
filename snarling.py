@@ -303,6 +303,12 @@ class snarlingCreature:
             print(f"[snarling] Thermal V2 pipeline unavailable: {e}")
         # ── End thermal integration ───────────────────────────────
 
+        # ── Thermal view mode (Y button toggle) ──────────────────────
+        self._thermal_view = False  # True = show thermal camera on display
+        self._thermal_frame_cache = None  # Latest rotated frame data
+        self._thermal_frame_lock = threading.Lock()
+        self._thermal_ambient_cache = None  # Latest ambient temp
+
 
 
 
@@ -1208,11 +1214,50 @@ class snarlingCreature:
         faces = FaceExpressions.get_faces_for_state(self.state)
         self.current_face = faces[0] if faces else "(◕‿‿◕)"
 
-    def toggle_mute(self):
+    # ── Thermal view rendering ──────────────────────────────────────
+
+    def _draw_thermal_view(self):
+        """Render thermal camera heat map on the display."""
+        if not self._thermal_available or self.thermal is None:
+            self._thermal_view = False
+            return
+
+        frame_data = self.thermal.latest_frame
+        if frame_data is None:
+            # No frame yet — show "waiting" message
+            self.draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(0, 0, 0))
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24)
+            except OSError:
+                font = ImageFont.load_default()
+            self.draw.text((10, HEIGHT // 2 - 12), "Thermal...", fill=(255, 255, 255), font=font)
+            return
+
+        # Delegate to thermal_view module (optional — graceful fallback if missing)
+        try:
+            from thermal_view import draw_thermal_view
+            if not draw_thermal_view(self.draw, WIDTH, HEIGHT, frame_data):
+                # No frame data — show waiting
+                pass
+        except ImportError:
+            # thermal_view.py not available — disable thermal view
+            self._thermal_view = False
+            logger.warning("thermal_view module not found, disabling thermal view")
+
         """Toggle mute/quiet mode"""
         self.mute = not self.mute
         self.status_message = "Muted" if self.mute else "Unmuted"
         self.status_timer = 45
+
+    def toggle_thermal_view(self):
+        """Toggle between normal snarling view and thermal camera view."""
+        self._thermal_view = not self._thermal_view
+        if self._thermal_view:
+            self.status_message = "Thermal View"
+            self.status_timer = 30  # ~1 second
+        else:
+            self.status_message = "Normal View"
+            self.status_timer = 30
 
     # ── Thermal sensor callbacks ────────────────────────────────────
 
@@ -1265,18 +1310,22 @@ class snarlingCreature:
                     presence_active = self._environmental_state.get("present", False)
                 event = self._v2_trigger_scheduler.on_scheduled(snapshot, presence_active=presence_active)
                 if event is not None:
+                    # Agent context: distilled view without histories
+                    agent_context = self._v2_world_state.get_agent_context("scheduled")
                     v2_event = {
                         "type": "observation_report",
                         "trigger_reason": "scheduled",
                         "present": event.present,
                         "absent_duration": event.absent_duration,
                         "absent_duration_sec": event.absent_duration_sec,
-                        "world_state": event.world_state,
+                        "world_state": agent_context,
                         "changes_since_last": event.changes_since_last,
                         "timestamp": event.timestamp,
                     }
                     self._post_environmental_event(v2_event)
-                    append_log(f"V2 observation_report (scheduled): {len(event.world_state.get('sources', {}))} sources")
+                    n_sources = agent_context.get("summary", {}).get("source_count", "?")
+                    n_attention = len(agent_context.get("attention_sources", []))
+                    append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention")
         except Exception:
             pass  # V2 is additive — never let errors break V1
 
@@ -1528,6 +1577,16 @@ class snarlingCreature:
         except Exception:
             pass  # Silent fail — plugin may not be running
 
+        # Persist observation reports to disk so the environmental agent can
+        # re-read them later (events are fire-and-forget — if the agent fails
+        # to process, the data is gone). Only the latest report is kept.
+        if event_data.get("type") == "observation_report":
+            try:
+                import json as _json
+                _json.dump(event_data, open("/tmp/latest-observation-report.json", "w"), indent=2)
+            except Exception:
+                pass
+
     def _log_presence_event(self, event_data):
         """Append a presence event as a single JSON line to /tmp/presence-log.jsonl.
         Compact format for low token cost when the environmental agent reads it."""
@@ -1591,18 +1650,22 @@ class snarlingCreature:
                 snapshot = self._v2_world_state.get_snapshot()
                 event = self._v2_trigger_scheduler.on_presence_settled(snapshot)
                 if event is not None:
+                    # Agent context: distilled view without histories
+                    agent_context = self._v2_world_state.get_agent_context("presence_settled")
                     v2_event = {
                         "type": "observation_report",
                         "trigger_reason": "presence_settled",
                         "present": True,
                         "absent_duration": event.absent_duration,
                         "absent_duration_sec": event.absent_duration_sec,
-                        "world_state": event.world_state,
+                        "world_state": agent_context,
                         "changes_since_last": event.changes_since_last,
                         "timestamp": event.timestamp,
                     }
                     self._post_environmental_event(v2_event)
-                    append_log(f"V2 observation_report (presence_settled): {len(event.world_state.get('sources', {}))} sources")
+                    n_sources = agent_context.get("summary", {}).get("source_count", "?")
+                    n_attention = len(agent_context.get("attention_sources", []))
+                    append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention")
             except Exception as e:
                 append_log(f"V2 presence_settled error: {e}")
 
@@ -2249,7 +2312,9 @@ class snarlingCreature:
                 except: pass
                 # Button just pressed - check approval state first
                 if self.state == STATE_AWAITING_APPROVAL:
-                    if name == 'A':
+                    if name == 'Y':
+                        self.toggle_thermal_view()
+                    elif name == 'A':
                         self.approve_request()
                     elif name == 'B':
                         self.reject_request()
@@ -2262,7 +2327,10 @@ class snarlingCreature:
                     # A or B press when not revealed → reveal the notification text
                     # A press after reveal → accept (neutral dismiss)
                     # B press after reveal → reject (negative dismiss)
-                    if name in ('A', 'B') and not self._notify_text_revealed:
+                    # Y always toggles thermal view regardless of notification state
+                    if name == 'Y':
+                        self.toggle_thermal_view()
+                    elif name in ('A', 'B') and not self._notify_text_revealed:
                         # First press: reveal notification text (either button works)
                         self._notify_text_revealed = True
                         self._notify_reveal_time = time.time() - self._notify_start_time
@@ -2297,7 +2365,7 @@ class snarlingCreature:
                         else:
                             self.trigger_voice_input()
                     elif name == 'Y':
-                        self.toggle_sleep_mode()
+                        self.toggle_thermal_view()
                     elif name == 'B':
                         pass  # B handled by approval/notification above
 
@@ -2409,6 +2477,11 @@ class snarlingCreature:
                     y += 24
             return
         
+        # Thermal camera view mode
+        if self._thermal_view:
+            self._draw_thermal_view()
+            return
+
         # Normal rendering when awake — new design system
         # 1. Background
         self.draw_background()
@@ -2466,7 +2539,7 @@ class snarlingCreature:
         print("  A: Show status summary")
         print("  B: Trigger heartbeat check")
         print("  X: Toggle sleep mode")
-        print("  Y: Toggle mute/quiet mode")
+        print("  Y: Toggle thermal camera view")
         print("  Ctrl+C: Exit")
         print()
 

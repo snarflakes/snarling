@@ -137,6 +137,10 @@ class ThermalSensor:
         self._zone = ZONE_ABSENT
         self._last_change = 0.0  # epoch of last state change
 
+        # Cache latest rotated frame for thermal view rendering
+        self._latest_rotated = None
+        self._latest_ambient = None
+
         # Confirmed presence debounce (30-frame, for callbacks/cascade)
         self._debounce_present_count = 0
         self._debounce_absent_count = 0
@@ -182,6 +186,15 @@ class ThermalSensor:
     def is_running(self) -> bool:
         """Check if the thermal reader thread is alive."""
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def latest_frame(self):
+        """Return (rotated_frame, rows, cols) or None if no frame yet.
+        Thread-safe: returns a copy of the cached frame data."""
+        with self._lock:
+            if self._latest_rotated is None:
+                return None
+            return (list(self._latest_rotated), 32, 24)  # ROWS=32, COLS=24
 
     def get_presence_info(self) -> dict:
         """Return full presence info dict for /presence endpoint."""
@@ -314,6 +327,10 @@ class ThermalSensor:
                 raw_c = (RAW_COLS - 1) - r
                 rotated[r * COLS + c] = frame[raw_r * RAW_COLS + raw_c]
 
+        # Cache rotated frame for thermal view rendering
+        with self._lock:
+            self._latest_rotated = rotated
+
         # 1. Compute ambient using median of interior pixels (robust to edge
         #    artifacts and warm blobs). Edge margin pixels are excluded.
         interior_temps = []
@@ -412,6 +429,11 @@ class ThermalSensor:
                     "temp_min": min(rotated[r * COLS + c] for r, c in blob_pixels),
                     "temp_max": max(rotated[r * COLS + c] for r, c in blob_pixels),
                     "temp_mean": avg_temp,
+                    "bbox": (min_r, min_c, max_r, max_c),
+                    "width": max_c - min_c + 1,
+                    "height": max_r - min_r + 1,
+                    "area_pixels": size,
+                    "aspect_ratio": (max_c - min_c + 1) / max(1, max_r - min_r + 1),
                 })
             try:
                 self._on_frame_data(v2_blobs, best_person, ambient)
