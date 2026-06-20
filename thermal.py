@@ -111,19 +111,22 @@ class ThermalSensor:
         last_update  – float, epoch timestamp of last successful frame
     """
 
-    def __init__(self, on_presence_change=None, on_proximity_change=None, on_display_zone_change=None):
+    def __init__(self, on_presence_change=None, on_proximity_change=None, on_display_zone_change=None, on_frame_data=None):
         """
         Args:
             on_presence_change: callback(was_absent: bool, now_present: bool, ambient_temp: float)
-                called when presence state changes (30-frame debounce)
+                called when presence state changes (15-frame debounce)
             on_proximity_change: callback(old_zone: str, new_zone: str, proximity: float, ambient_temp: float)
-                called when confirmed proximity zone changes (30-frame debounce)
+                called when confirmed proximity zone changes (15-frame debounce)
             on_display_zone_change: callback(old_zone: str, new_zone: str, proximity: float, ambient_temp: float)
                 called on fast zone transitions (2-frame debounce) for face/LED responsiveness
+            on_frame_data: callback(blob_list: list, best_person: dict|None, ambient: float)
+                called every frame at 4Hz with raw blob data for V2 pipeline
         """
         self._on_presence_change = on_presence_change
         self._on_proximity_change = on_proximity_change
         self._on_display_zone_change = on_display_zone_change
+        self._on_frame_data = on_frame_data
 
         # Shared state protected by lock
         self._lock = threading.Lock()
@@ -133,6 +136,10 @@ class ThermalSensor:
         self._last_update = 0.0
         self._zone = ZONE_ABSENT
         self._last_change = 0.0  # epoch of last state change
+
+        # Cache latest rotated frame for thermal view rendering
+        self._latest_rotated = None
+        self._latest_ambient = None
 
         # Confirmed presence debounce (30-frame, for callbacks/cascade)
         self._debounce_present_count = 0
@@ -179,6 +186,15 @@ class ThermalSensor:
     def is_running(self) -> bool:
         """Check if the thermal reader thread is alive."""
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def latest_frame(self):
+        """Return (rotated_frame, rows, cols) or None if no frame yet.
+        Thread-safe: returns a copy of the cached frame data."""
+        with self._lock:
+            if self._latest_rotated is None:
+                return None
+            return (list(self._latest_rotated), 32, 24)  # ROWS=32, COLS=24
 
     def get_presence_info(self) -> dict:
         """Return full presence info dict for /presence endpoint."""
@@ -311,6 +327,10 @@ class ThermalSensor:
                 raw_c = (RAW_COLS - 1) - r
                 rotated[r * COLS + c] = frame[raw_r * RAW_COLS + raw_c]
 
+        # Cache rotated frame for thermal view rendering
+        with self._lock:
+            self._latest_rotated = rotated
+
         # 1. Compute ambient using median of interior pixels (robust to edge
         #    artifacts and warm blobs). Edge margin pixels are excluded.
         interior_temps = []
@@ -391,7 +411,36 @@ class ThermalSensor:
             raw_present = False
             raw_proximity = 0.0
 
-        # 7. Debounce
+        # 7. Fire frame data callback (4Hz, no debounce — for V2 pipeline)
+        if self._on_frame_data:
+            # Build blob list with V2-compatible format
+            v2_blobs = []
+            for blob_pixels in blobs:
+                if len(blob_pixels) < MIN_PERSON_PIXELS:
+                    continue  # skip tiny blobs
+                size = len(blob_pixels)
+                avg_temp = sum(rotated[r * COLS + c] for r, c in blob_pixels) / size
+                min_r, min_c, max_r, max_c = _blob_bounds(blob_pixels)
+                centroid_r = sum(r for r, c in blob_pixels) / size
+                centroid_c = sum(c for r, c in blob_pixels) / size
+                v2_blobs.append({
+                    "centroid": (centroid_r, centroid_c),
+                    "pixel_count": size,
+                    "temp_min": min(rotated[r * COLS + c] for r, c in blob_pixels),
+                    "temp_max": max(rotated[r * COLS + c] for r, c in blob_pixels),
+                    "temp_mean": avg_temp,
+                    "bbox": (min_r, min_c, max_r, max_c),
+                    "width": max_c - min_c + 1,
+                    "height": max_r - min_r + 1,
+                    "area_pixels": size,
+                    "aspect_ratio": (max_c - min_c + 1) / max(1, max_r - min_r + 1),
+                })
+            try:
+                self._on_frame_data(v2_blobs, best_person, ambient)
+            except Exception:
+                logger.debug("frame_data callback error", exc_info=True)
+
+        # 8. Debounce
         self._apply_debounce(raw_present, raw_proximity, ambient, timestamp)
 
     # ── Debounce logic ────────────────────────────────────────────
