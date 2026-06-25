@@ -1149,15 +1149,21 @@ class snarlingCreature:
                     except: pass
                     if response.status_code != 200:
                         print(f"[snarling] Transcribe failed: {response.status_code}")
-                        self.state = STATE_SLEEPING
-                        self.led_timer = 0
+                        try: append_log(f"transcribe failed: {response.status_code}")
+                        except: pass
+                        self.state = STATE_PROCESSING
+                        self.status_message = "⚠ No connection"
+                        self.status_timer = 120  # ~4 seconds
+                        self.led_timer = 30
                     # On success, plugin handles state transitions via /state API
                 except Exception as e:
                     print(f"[snarling] Transcribe POST error: {e}")
                     try: append_log(f"transcribe error: {e}")
                     except: pass
-                    self.state = STATE_SLEEPING
-                    self.led_timer = 0
+                    self.state = STATE_PROCESSING
+                    self.status_message = "⚠ No internet"
+                    self.status_timer = 120  # ~4 seconds
+                    self.led_timer = 30
 
                 # Don't clean up WAV — plugin will read it async.
                 # Clean up after a delay instead.
@@ -1175,8 +1181,10 @@ class snarlingCreature:
                 print(f"[snarling] Voice input error: {e}")
                 try: append_log(f"voice error: {e}")
                 except: pass
-                self.state = STATE_SLEEPING
-                self.led_timer = 0
+                self.state = STATE_PROCESSING
+                self.status_message = "⚠ Voice error"
+                self.status_timer = 120  # ~4 seconds
+                self.led_timer = 30
 
         voice_thread = threading.Thread(target=_record_and_post, daemon=True)
         voice_thread.start()
@@ -2429,6 +2437,11 @@ class snarlingCreature:
                 self.forward_approval_response(approved=False)
                 # Activate next queued approval or return to normal
                 self._advance_after_approval()
+
+        # Auto-recover from error/processing states when status timer expires
+        if self.status_timer == 0 and self.state in (STATE_ERROR, STATE_PROCESSING, STATE_LISTENING):
+            self.state = STATE_SLEEPING
+            self.led_timer = 0
 
     def draw_frame(self):
         """Render the frame using the new design system"""
