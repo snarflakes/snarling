@@ -935,35 +935,19 @@ class snarlingCreature:
                     self._notify_banner_index = (self._notify_banner_index + 1) % len(self._notify_banners)
 
                 try:
-                    header_font = ImageFont.truetype(
-                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
-                    )
                     msg_font = ImageFont.truetype(
                         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
                     )
                 except OSError:
-                    header_font = ImageFont.load_default()
-                    msg_font = header_font
+                    msg_font = ImageFont.load_default()
 
                 lines = self._notify_banners[self._notify_banner_index]
-                is_banner1 = (self._notify_banner_index == 0)
 
-                if is_banner1:
-                    # Banner 1: header + preview (2 lines)
-                    total_notifications = 1 + len(self._notify_stack)
-                    if total_notifications > 1:
-                        count_indicator = f" ({1}/{total_notifications})"
-                        self.draw.text((text_left, banner_top), lines[0] + count_indicator, fill=(255, 200, 200), font=header_font)
-                    else:
-                        self.draw.text((text_left, banner_top), lines[0], fill=(255, 200, 200), font=header_font)
-                    if lines[1]:
-                        self.draw.text((text_left, banner_top + 28), lines[1], fill=(255, 255, 255), font=msg_font)
-                else:
-                    # Banner 2: word-wrapped message (3 lines)
-                    line_height = 22
-                    for i in range(min(len(lines), 3)):
-                        y = banner_top + (i * line_height)
-                        self.draw.text((text_left, y), lines[i], fill=(255, 255, 255), font=msg_font)
+                # All notification banners: 3 lines of word-wrapped text, same format
+                line_height = 22
+                for i in range(min(len(lines), 3)):
+                    y = banner_top + (i * line_height)
+                    self.draw.text((text_left, y), lines[i], fill=(255, 255, 255), font=msg_font)
             else:
                 # Show subtle hint so user knows they can interact
                 hint_text = "• A: read  B: dismiss"
@@ -1922,15 +1906,11 @@ class snarlingCreature:
         # Strip emoji characters that DejaVu can't render
         message = self._strip_emoji(message)
         try:
-            banner_header_font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
-            )
             banner_msg_font = ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
             )
         except OSError:
-            banner_header_font = ImageFont.load_default()
-            banner_msg_font = banner_header_font
+            banner_msg_font = ImageFont.load_default()
 
         def word_wrap(text, font, max_width):
             """Word-wrap text to fit within max_width pixels using the given font."""
@@ -1956,50 +1936,26 @@ class snarlingCreature:
                 lines.append(current)
             return lines
 
-        # Banner 1: Priority header + short preview
-        priority_headers = {
-            'high': "!! HIGH",
-            'normal': "* MODERATE",
-            'low': "~ LOW",
-        }
-        header = priority_headers.get(priority, "* NOTIFICATION")
-        # Preview line: first ~25 chars of message, word-wrapped
-        preview_text = message[:25]
-        # If we cut in the middle of a word, truncate at last space
-        if len(message) > 25 and ' ' in preview_text:
-            preview_text = preview_text.rsplit(' ', 1)[0]
-        # Word-wrap preview with header font
-        preview_lines = word_wrap(preview_text, banner_header_font, max_width=280)
-        preview_line = preview_lines[0] if preview_lines else ""
-        banner1 = [header, preview_line]
-
-        # Banner 2: First 3 lines of the full message
+        # Split message into 3-line chunks for compact banners
         msg_lines = word_wrap(message, banner_msg_font, max_width=280)
-        banner2_lines = msg_lines[:3]
-        # If there's more, truncate last line with "..."
-        if len(msg_lines) > 3:
-            banner2_lines = msg_lines[:3]
-            banner2_lines[2] = banner2_lines[2][:30] + "..."
-        while len(banner2_lines) < 3:
-            banner2_lines.append("")
-        banner2 = banner2_lines
 
-        # Banner 3: Continuation — lines 4+ of the full message
-        remaining_lines = msg_lines[3:] if len(msg_lines) > 3 else []
-        if remaining_lines:
-            banner3_lines = remaining_lines[:3]
-            # If still more, truncate last line with "..."
-            if len(remaining_lines) > 3:
-                banner3_lines = remaining_lines[:3]
-                banner3_lines[2] = banner3_lines[2][:30] + "..."
-            while len(banner3_lines) < 3:
-                banner3_lines.append("")
-            banner3 = banner3_lines
-        else:
-            # No continuation needed — skip banner 3 (empty)
-            banner3 = None
+        # Build banners: each banner is 3 lines of content
+        banners = []
+        for i in range(0, len(msg_lines), 3):
+            chunk = msg_lines[i:i+3]
+            # Truncate last line of last chunk if there's more content
+            if i + 3 < len(msg_lines) and len(chunk) == 3:
+                chunk[2] = chunk[2][:30] + "..."
+            # Pad to 3 lines
+            while len(chunk) < 3:
+                chunk.append("")
+            banners.append(chunk)
 
-        self._notify_banners = [b for b in [banner1, banner2, banner3] if b is not None]
+        # Ensure at least one banner (even for empty messages)
+        if not banners:
+            banners = [["", "", ""]]
+
+        self._notify_banners = banners
         self._notify_banner_index = 0
         self._notify_banner_timer = 0
         self._notify_banner_interval = 45  # ~1.5s at 30fps
