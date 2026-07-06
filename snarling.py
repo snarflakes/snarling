@@ -2498,8 +2498,9 @@ class snarlingCreature:
                 # Activate next queued approval or return to normal
                 self._advance_after_approval()
 
-        # Auto-recover from error/processing states when status timer expires
-        if self.status_timer == 0 and self.state in (STATE_ERROR, STATE_PROCESSING, STATE_LISTENING):
+        # Auto-recover from error state when status timer expires
+        # (processing and listening are managed by the plugin — agent_end sends sleeping)
+        if self.status_timer == 0 and self.state == STATE_ERROR:
             self.state = STATE_SLEEPING
             self.led_timer = 0
 
@@ -2796,16 +2797,6 @@ if FLASK_AVAILABLE and approval_app:
                 creature_instance._notify_pre_state = state
                 print(f"[snarling] State update queued for after notification: {state}")
                 return jsonify({"status": "queued", "reason": "notifying", "pending_state": state})
-
-            # Always refresh the status timer on state updates from the plugin,
-            # even if the state hasn't changed. This prevents auto-recovery from
-            # expiring mid-turn when the plugin sends repeated "processing" updates.
-            if state == STATE_SLEEPING:
-                creature_instance.led_timer = 0
-                creature_instance.status_timer = 0
-            else:
-                # 30fps * 60s * 5min = 9000 frames = 5 minute timeout
-                creature_instance.status_timer = 9000
 
             if state != creature_instance.state:
                 old_state = creature_instance.state
