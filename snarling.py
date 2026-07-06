@@ -1574,20 +1574,29 @@ class snarlingCreature:
             # presence.db only stores confirmed states: settled or absent.
             # Internal transient states (arrived, departing) are mapped to the
             # previous confirmed state until snarling is confident enough.
-            # arrived → previous state (absent if no prior settled)
-            # departing → previous state (settled if just seen)
+            # arrived → don't write yet (person detected but not stable 60s)
+            # departing → absent (person gone, transitional state not meaningful)
+            # settled → settled (confirmed stable presence)
+            # absent → absent (confirmed absence)
             if not present:
                 db_presence_state = "absent"
             elif presence_state == "settled":
                 db_presence_state = "settled"
-            elif presence_state == "arrived":
-                # Not yet confirmed stable — keep previous state (likely absent)
-                db_presence_state = "absent"
             else:
-                # Fallback: infer from settling state
-                db_presence_state = "settled" if self._is_settled else "absent"
+                # arrived or other transient state — skip the write entirely.
+                # presence.db already has the last confirmed state.
+                db_presence_state = None
 
-            if present:
+            if db_presence_state is None:
+                # Skip presence_state write for transient states (arrived, etc.)
+                # but still update present, last_seen, and updated_at so consumers know
+                # someone is detected even before we confirm they're settled.
+                cur.execute("""UPDATE presence SET
+                    present = ?,
+                    last_seen = ?,
+                    updated_at = ?
+                WHERE id = 1""", (1 if present else 0, now_iso, now_iso))
+            elif present:
                 # Arriving: since = arrival time (set if NULL, preserve otherwise)
                 # COALESCE keeps the original arrival time across observation_report updates
                 cur.execute("""UPDATE presence SET
@@ -1602,7 +1611,8 @@ class snarlingCreature:
                  WHERE id = 1""", (
                      1,
                     db_presence_state,
-                     now_iso,  # last_seen
+                    now_iso,  # since: set if NULL (arrival time)
+                    now_iso,  # last_seen
                      confidence,
                      old_summary,  # preserve agent's interpretive label
                      old_summary_ts,  # preserve agent's timestamp
@@ -1635,9 +1645,9 @@ class snarlingCreature:
                 ))
             conn.commit()
             conn.close()
-            print(f"[snarling] presence.db updated: present={present}, state={presence_state}")
+            append_log(f"presence.db updated: present={present}, state={presence_state}")
         except Exception as e:
-            print(f"[snarling] presence.db write failed: {e}")
+            append_log(f"presence.db write failed: {e}")
 
     def _post_environmental_event(self, event_data):
         """Post an environmental event to the OpenClaw plugin.
@@ -1651,6 +1661,7 @@ class snarlingCreature:
         # receives push events (which it doesn't — see bug #86090).
         event_type = event_data.get("type")
         event_present = event_data.get("present")
+        append_log(f"_post_env: type={event_type}, present={event_present}, settled={self._is_settled}")
         if event_present is not None:
             if event_type == "presence_settled":
                 self._update_presence_db(present=True, presence_state="settled")
@@ -1767,6 +1778,7 @@ class snarlingCreature:
                         "changes_since_last": event.changes_since_last,
                         "timestamp": event.timestamp,
                     }
+                    append_log(f"presence_settled → _post_env: type={v2_event.get('type')}, present={v2_event.get('present')}")
                     self._post_environmental_event(v2_event)
                     n_sources = agent_context.get("summary", {}).get("source_count", "?")
                     n_attention = len(agent_context.get("attention_sources", []))
