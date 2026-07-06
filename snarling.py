@@ -1597,12 +1597,11 @@ class snarlingCreature:
                     updated_at = ?
                 WHERE id = 1""", (1 if present else 0, now_iso, now_iso))
             elif present:
-                # Arriving: since = arrival time (set if NULL, preserve otherwise)
-                # COALESCE keeps the original arrival time across observation_report updates
+                # Arriving: since = arrival time (always reset on arrival)
                 cur.execute("""UPDATE presence SET
                     present = ?,
                     presence_state = ?,
-                    since = COALESCE(since, ?),
+                    since = ?,
                     last_seen = ?,
                     presence_confidence = ?,
                      environment_summary = ?,
@@ -1611,7 +1610,7 @@ class snarlingCreature:
                  WHERE id = 1""", (
                      1,
                     db_presence_state,
-                    now_iso,  # since: set if NULL (arrival time)
+                    now_iso,  # since: arrival time
                     now_iso,  # last_seen
                      confidence,
                      old_summary,  # preserve agent's interpretive label
