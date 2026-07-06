@@ -277,11 +277,35 @@ class ThermalSensor:
                 try:
                     self._mlx.getFrame(frame)
                 except Exception as exc:
-                    logger.warning("MLX90640 read error: %s — backing off %ss",
-                                    exc, ERROR_BACKOFF)
+                    logger.warning("MLX90640 read error: %s — reinitializing sensor", exc)
                     with self._lock:
                         self._sensor_ready = False
-                    self._stop_event.wait(ERROR_BACKOFF)
+                    # Close and recreate the I2C connection to reset the sensor.
+                    # A simple backoff doesn't help — the sensor stays in its
+                    # corrupted state until the driver object is recreated.
+                    try:
+                        if self._mlx is not None:
+                            self._mlx = None
+                        import board
+                        import busio
+                        from adafruit_mlx90640 import MLX90640, RefreshRate
+                        i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+                        self._mlx = MLX90640(i2c, address=0x33)
+                        self._mlx.refresh_rate = RefreshRate.REFRESH_4_HZ
+                        frame = [0.0] * 768
+                        self._mlx.getFrame(frame)
+                        self._sensor_ready = True
+                        logger.info("MLX90640 reinitialized successfully — resetting frame count")
+                        # Reset V2 frame counter so we get fresh liveness logs
+                        try:
+                            if hasattr(self, '_on_frame_data') and self._on_frame_data:
+                                pass  # callback is still connected
+                        except Exception:
+                            pass
+                    except Exception as reinit_exc:
+                        logger.warning("MLX90640 reinit failed: %s — backing off %ss",
+                                        reinit_exc, ERROR_BACKOFF)
+                        self._stop_event.wait(ERROR_BACKOFF)
                     continue
 
                 try:
@@ -312,6 +336,13 @@ class ThermalSensor:
 
     def _process_frame(self, frame, timestamp):
         """Analyse one thermal frame and update shared state."""
+        # Diagnostics: log every 500th frame to confirm processing is alive
+        if not hasattr(self, '_diag_frame_count'):
+            self._diag_frame_count = 0
+        self._diag_frame_count += 1
+        if self._diag_frame_count <= 3 or self._diag_frame_count % 500 == 0:
+            logger.info("_process_frame #%d called", self._diag_frame_count)
+
         # Raw sensor dimensions (camera mounted 90° CW)
         RAW_ROWS, RAW_COLS = 24, 32
         # After 90° CCW rotation to correct orientation

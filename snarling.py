@@ -1262,7 +1262,8 @@ class snarlingCreature:
         try:
             self._v2_process_frame(blobs, ambient_temp)
         except Exception as e:
-            append_log(f"V2 frame data error: {e}")
+            import traceback
+            append_log(f"V2 frame data error: {e}\n{traceback.format_exc()}")
 
     def _v2_process_frame(self, blobs, ambient_temp):
         """Feed thermal frame data into V2 pipeline: tracker → measurements → world_state.
@@ -1276,11 +1277,11 @@ class snarlingCreature:
         if self._v2_tracker is None:
             return
 
-        # Log first 3 frames on startup to verify V2 pipeline is receiving data
+        # Log first 3 frames on startup, then every 1000th frame for liveness
         if not hasattr(self, '_v2_frame_count'):
             self._v2_frame_count = 0
         self._v2_frame_count += 1
-        if self._v2_frame_count <= 3:
+        if self._v2_frame_count <= 3 or self._v2_frame_count % 1000 == 0:
             append_log(f"V2 frame #{self._v2_frame_count}: {len(blobs)} blobs, ambient={ambient_temp:.1f}")
 
         try:
@@ -1319,7 +1320,9 @@ class snarlingCreature:
                     n_attention = len(agent_context.get("attention_sources", []))
                     append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention")
         except Exception:
-            pass  # V2 is additive — never let errors break V1
+            import traceback
+            append_log(f"V2 scheduled check error: {traceback.format_exc()}")
+            # V2 is additive — never let errors break V1
 
     def _on_thermal_presence_change(self, absent, present, ambient_temp=None):
         """Callback from thermal sensor when presence state changes.
@@ -1548,12 +1551,113 @@ class snarlingCreature:
             minutes = int((seconds % 3600) // 60)
             return f"{hours}h{minutes}m" if minutes else f"{hours}h"
 
+    def _update_presence_db(self, present, presence_state, confidence="high"):
+        """Write deterministic presence fields directly to presence.db.
+        This eliminates the bug where the LLM agent fails to update presence.db
+        because it never receives push events (the session is done between heartbeats).
+        Only writes deterministic fields: present, presence_state, since, last_seen,
+        presence_confidence, updated_at. Leaves environment_summary untouched if
+        already set — the agent can update that on heartbeats."""
+        db_path = "/home/openpi/.openclaw/workspace-environmental/memory/presence.db"
+        try:
+            import sqlite3 as _sql
+            conn = _sql.connect(db_path, timeout=5)
+            cur = conn.cursor()
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
+
+            # Read current row to preserve environment_summary
+            cur.execute("SELECT environment_summary FROM presence WHERE id = 1")
+            row = cur.fetchone()
+            old_summary = row[0] if row else "environment_stable"
+
+            # Compute presence_state from snarling's internal state
+            # arrived: just appeared (< 60s, not yet settled)
+            # settled: been present for 60+ seconds
+            # departing: just left (transient, will become absent)
+            # absent: no one detected
+            if not present:
+                presence_state = "absent"
+            elif presence_state is None:
+                # Infer from settling state
+                presence_state = "settled" if self._is_settled else "arrived"
+
+            if present:
+                # Arriving: since = arrival time (set if NULL, preserve otherwise)
+                # COALESCE keeps the original arrival time across observation_report updates
+                cur.execute("""UPDATE presence SET
+                    present = ?,
+                    presence_state = ?,
+                    since = COALESCE(since, ?),
+                    last_seen = ?,
+                    presence_confidence = ?,
+                    environment_summary = ?,
+                    updated_at = ?
+                WHERE id = 1""", (
+                    1,
+                    presence_state,
+                    now_iso,  # since — only set if currently NULL
+                    now_iso,  # last_seen
+                    confidence,
+                    old_summary,  # preserve agent's interpretive label
+                    now_iso,  # updated_at
+                ))
+            else:
+                # Departing/absent: since = when absence started
+                # Use _last_absence_time if available, otherwise now
+                absence_since = now_iso
+                if self._last_absence_time is not None:
+                    absence_since = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(self._last_absence_time))
+                cur.execute("""UPDATE presence SET
+                    present = ?,
+                    presence_state = ?,
+                    since = ?,
+                    last_seen = ?,
+                    presence_confidence = ?,
+                    environment_summary = ?,
+                    updated_at = ?
+                WHERE id = 1""", (
+                    0,
+                    presence_state,  # "absent" or "departing"
+                    absence_since,    # when absence started
+                    now_iso,          # last_seen = now
+                    confidence,
+                    old_summary,  # preserve agent's interpretive label
+                    now_iso,  # updated_at
+                ))
+            conn.commit()
+            conn.close()
+            print(f"[snarling] presence.db updated: present={present}, state={presence_state}")
+        except Exception as e:
+            print(f"[snarling] presence.db write failed: {e}")
+
     def _post_environmental_event(self, event_data):
         """Post an environmental event to the OpenClaw plugin.
         Fire-and-forget — if the plugin isn't listening, that's fine.
         Only posts if ENVIRONMENTAL_EVENTS_ENABLED is True."""
         if not ENVIRONMENTAL_EVENTS_ENABLED:
             return
+
+        # Write deterministic presence fields to presence.db directly.
+        # This ensures presence.db stays current even if the agent never
+        # receives push events (which it doesn't — see bug #86090).
+        event_type = event_data.get("type")
+        event_present = event_data.get("present")
+        if event_present is not None:
+            if event_type == "presence_settled":
+                self._update_presence_db(present=True, presence_state="settled")
+            elif event_type == "presence_change":
+                if event_present:
+                    self._update_presence_db(present=True, presence_state="arrived")
+                else:
+                    self._update_presence_db(present=False, presence_state="absent")
+            elif event_type == "observation_report":
+                # Observation reports: just update last_seen and updated_at
+                if event_present:
+                    state = "settled" if self._is_settled else "arrived"
+                    self._update_presence_db(present=True, presence_state=state)
+                else:
+                    self._update_presence_db(present=False, presence_state="absent")
+
         try:
             import requests as req_lib
             gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
