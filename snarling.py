@@ -1571,16 +1571,21 @@ class snarlingCreature:
             old_summary = row[0] if row else "environment_stable"
             old_summary_ts = row[1] if row and row[1] else ""
 
-            # Compute presence_state from snarling's internal state
-            # arrived: just appeared (< 60s, not yet settled)
-            # settled: been present for 60+ seconds
-            # departing: just left (transient, will become absent)
-            # absent: no one detected
+            # presence.db only stores confirmed states: settled or absent.
+            # Internal transient states (arrived, departing) are mapped to the
+            # previous confirmed state until snarling is confident enough.
+            # arrived → previous state (absent if no prior settled)
+            # departing → previous state (settled if just seen)
             if not present:
-                presence_state = "absent"
-            elif presence_state is None:
-                # Infer from settling state
-                presence_state = "settled" if self._is_settled else "arrived"
+                db_presence_state = "absent"
+            elif presence_state == "settled":
+                db_presence_state = "settled"
+            elif presence_state == "arrived":
+                # Not yet confirmed stable — keep previous state (likely absent)
+                db_presence_state = "absent"
+            else:
+                # Fallback: infer from settling state
+                db_presence_state = "settled" if self._is_settled else "absent"
 
             if present:
                 # Arriving: since = arrival time (set if NULL, preserve otherwise)
@@ -1596,8 +1601,7 @@ class snarlingCreature:
                      updated_at = ?
                  WHERE id = 1""", (
                      1,
-                     presence_state,
-                     now_iso,  # since — only set if currently NULL
+                    db_presence_state,
                      now_iso,  # last_seen
                      confidence,
                      old_summary,  # preserve agent's interpretive label
@@ -1621,7 +1625,7 @@ class snarlingCreature:
                      updated_at = ?
                  WHERE id = 1""", (
                      0,
-                     presence_state,  # "absent" or "departing"
+                    db_presence_state,  # mapped: arrived->absent, settled->settled, absent->absent
                      absence_since,    # when absence started
                      now_iso,          # last_seen = now
                      confidence,
