@@ -1555,9 +1555,9 @@ class snarlingCreature:
         """Write deterministic presence fields directly to presence.db.
         This eliminates the bug where the LLM agent fails to update presence.db
         because it never receives push events (the session is done between heartbeats).
-        Only writes deterministic fields: present, presence_state, since, last_seen,
-        presence_confidence, updated_at. Leaves environment_summary untouched if
-        already set — the agent can update that on heartbeats."""
+ Only writes deterministic fields: present, presence_state, since, last_seen,
+         presence_confidence, updated_at. Leaves environment_summary and
+         environment_summary_updated_at untouched — the agent owns those."""
         db_path = "/home/openpi/.openclaw/workspace-environmental/memory/presence.db"
         try:
             import sqlite3 as _sql
@@ -1565,10 +1565,11 @@ class snarlingCreature:
             cur = conn.cursor()
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
 
-            # Read current row to preserve environment_summary
-            cur.execute("SELECT environment_summary FROM presence WHERE id = 1")
+                         # Read current row to preserve environment_summary + its timestamp
+            cur.execute("SELECT environment_summary, environment_summary_updated_at FROM presence WHERE id = 1")
             row = cur.fetchone()
             old_summary = row[0] if row else "environment_stable"
+            old_summary_ts = row[1] if row and row[1] else ""
 
             # Compute presence_state from snarling's internal state
             # arrived: just appeared (< 60s, not yet settled)
@@ -1590,16 +1591,18 @@ class snarlingCreature:
                     since = COALESCE(since, ?),
                     last_seen = ?,
                     presence_confidence = ?,
-                    environment_summary = ?,
-                    updated_at = ?
-                WHERE id = 1""", (
-                    1,
-                    presence_state,
-                    now_iso,  # since — only set if currently NULL
-                    now_iso,  # last_seen
-                    confidence,
-                    old_summary,  # preserve agent's interpretive label
-                    now_iso,  # updated_at
+                     environment_summary = ?,
+                     environment_summary_updated_at = ?,
+                     updated_at = ?
+                 WHERE id = 1""", (
+                     1,
+                     presence_state,
+                     now_iso,  # since — only set if currently NULL
+                     now_iso,  # last_seen
+                     confidence,
+                     old_summary,  # preserve agent's interpretive label
+                     old_summary_ts,  # preserve agent's timestamp
+                     now_iso,  # updated_at
                 ))
             else:
                 # Departing/absent: since = when absence started
@@ -1613,16 +1616,18 @@ class snarlingCreature:
                     since = ?,
                     last_seen = ?,
                     presence_confidence = ?,
-                    environment_summary = ?,
-                    updated_at = ?
-                WHERE id = 1""", (
-                    0,
-                    presence_state,  # "absent" or "departing"
-                    absence_since,    # when absence started
-                    now_iso,          # last_seen = now
-                    confidence,
-                    old_summary,  # preserve agent's interpretive label
-                    now_iso,  # updated_at
+                     environment_summary = ?,
+                     environment_summary_updated_at = ?,
+                     updated_at = ?
+                 WHERE id = 1""", (
+                     0,
+                     presence_state,  # "absent" or "departing"
+                     absence_since,    # when absence started
+                     now_iso,          # last_seen = now
+                     confidence,
+                     old_summary,  # preserve agent's interpretive label
+                     old_summary_ts,  # preserve agent's timestamp
+                     now_iso,  # updated_at
                 ))
             conn.commit()
             conn.close()
@@ -2937,4 +2942,3 @@ if __name__ == "__main__":
         approval_thread.start()
     
     creature.run()
-
