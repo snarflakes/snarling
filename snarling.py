@@ -2797,6 +2797,16 @@ if FLASK_AVAILABLE and approval_app:
                 print(f"[snarling] State update queued for after notification: {state}")
                 return jsonify({"status": "queued", "reason": "notifying", "pending_state": state})
 
+            # Always refresh the status timer on state updates from the plugin,
+            # even if the state hasn't changed. This prevents auto-recovery from
+            # expiring mid-turn when the plugin sends repeated "processing" updates.
+            if state == STATE_SLEEPING:
+                creature_instance.led_timer = 0
+                creature_instance.status_timer = 0
+            else:
+                # 30fps * 60s * 5min = 9000 frames = 5 minute timeout
+                creature_instance.status_timer = 9000
+
             if state != creature_instance.state:
                 old_state = creature_instance.state
                 creature_instance.state = state
