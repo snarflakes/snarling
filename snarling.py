@@ -161,6 +161,7 @@ class snarlingCreature:
         self.state = STATE_SLEEPING
         self.mute = False
         self.last_update = time.time()
+        self._startup_time = time.time()  # grace period for threshold checks
         self.breath_phase = 0.0
         self.think_dots = 0
         self.talk_frame = 0
@@ -1320,8 +1321,13 @@ class snarlingCreature:
                     n_attention = len(agent_context.get("attention_sources", []))
                     # Stage 1: Log attention threshold check for scheduled observations too
                     ATTENTION_THRESHOLD = 4
-                    would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
-                    append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
+                    GRACE_PERIOD = 300  # 5 minutes after startup — sources not yet established
+                    elapsed_since_startup = time.time() - self._startup_time
+                    if elapsed_since_startup < GRACE_PERIOD:
+                        append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention, threshold_check=SKIP (grace period, {elapsed_since_startup:.0f}s since startup)")
+                    else:
+                        would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
+                        append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
         except Exception:
             import traceback
             append_log(f"V2 scheduled check error: {traceback.format_exc()}")
@@ -1786,8 +1792,13 @@ class snarlingCreature:
                     n_attention = len(agent_context.get("attention_sources", []))
                     # Stage 1: Log attention threshold check (no behavior change yet)
                     ATTENTION_THRESHOLD = 4  # proposed threshold for presence_settled
-                    would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
-                    append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
+                    GRACE_PERIOD = 300  # 5 minutes after startup — sources not yet established
+                    elapsed_since_startup = time.time() - self._startup_time
+                    if elapsed_since_startup < GRACE_PERIOD:
+                        append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention, threshold_check=SKIP (grace period, {elapsed_since_startup:.0f}s since startup)")
+                    else:
+                        would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
+                        append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
             except Exception as e:
                 append_log(f"V2 presence_settled error: {e}")
 
