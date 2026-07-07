@@ -1318,7 +1318,10 @@ class snarlingCreature:
                     self._post_environmental_event(v2_event)
                     n_sources = agent_context.get("summary", {}).get("source_count", "?")
                     n_attention = len(agent_context.get("attention_sources", []))
-                    append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention")
+                    # Stage 1: Log attention threshold check for scheduled observations too
+                    ATTENTION_THRESHOLD = 4
+                    would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
+                    append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
         except Exception:
             import traceback
             append_log(f"V2 scheduled check error: {traceback.format_exc()}")
@@ -1781,7 +1784,10 @@ class snarlingCreature:
                     self._post_environmental_event(v2_event)
                     n_sources = agent_context.get("summary", {}).get("source_count", "?")
                     n_attention = len(agent_context.get("attention_sources", []))
-                    append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention")
+                    # Stage 1: Log attention threshold check (no behavior change yet)
+                    ATTENTION_THRESHOLD = 4  # proposed threshold for presence_settled
+                    would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
+                    append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
             except Exception as e:
                 append_log(f"V2 presence_settled error: {e}")
 
