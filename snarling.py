@@ -161,7 +161,7 @@ class snarlingCreature:
         self.state = STATE_SLEEPING
         self.mute = False
         self.last_update = time.time()
-        self._startup_time = time.time()  # grace period for threshold checks
+        # Threshold checks no longer use grace period — sources establish in ~1.5s at 2Hz, well within the 60s settle timer
         self.breath_phase = 0.0
         self.think_dots = 0
         self.talk_frame = 0
@@ -292,6 +292,7 @@ class snarlingCreature:
         self._v2_trigger_scheduler = None
         self._v2_presence_observer = None
         self._v2_last_scheduled_check = 0.0  # epoch time of last on_scheduled() call
+        self._attention_log_last_ts = 0.0  # epoch time of last periodic attention log entry
         try:
             from thermal_v2 import BlobTracker, WorldState, MeasurementExtractor, TriggerScheduler, PresenceObserver
             self._v2_tracker = BlobTracker()
@@ -1319,15 +1320,38 @@ class snarlingCreature:
                     self._post_environmental_event(v2_event)
                     n_sources = agent_context.get("summary", {}).get("source_count", "?")
                     n_attention = len(agent_context.get("attention_sources", []))
-                    # Stage 1: Log attention threshold check for scheduled observations too
+                    # Log attention threshold check for scheduled observations
                     ATTENTION_THRESHOLD = 4
-                    GRACE_PERIOD = 300  # 5 minutes after startup — sources not yet established
-                    elapsed_since_startup = time.time() - self._startup_time
-                    if elapsed_since_startup < GRACE_PERIOD:
-                        append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention, threshold_check=SKIP (grace period, {elapsed_since_startup:.0f}s since startup)")
-                    else:
-                        would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
-                        append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
+                    would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
+                    append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
+
+                    # Periodic attention log: every 5 minutes while present, log source data
+                    # This gives us a time series for threshold tuning, not just event boundaries
+                    if presence_active and now - self._attention_log_last_ts >= 300:
+                        self._attention_log_last_ts = now
+                        periodic_entry = {
+                            "ts": int(now),
+                            "type": "attention_periodic",
+                            "source_count": len(snapshot.get("sources", {})),
+                            "attention_sources": n_attention,
+                        }
+                        # Temperature distribution
+                        sources = snapshot.get("sources", {})
+                        attention_srcs = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                        if attention_srcs:
+                            temp_ranges = {"body_range": 0, "warm_range": 0, "hot_range": 0}
+                            for s in attention_srcs:
+                                peak = s.get("peak_temp", 0)
+                                if peak >= 40:
+                                    temp_ranges["hot_range"] += 1
+                                elif peak >= 34:
+                                    temp_ranges["warm_range"] += 1
+                                else:
+                                    temp_ranges["body_range"] += 1
+                            periodic_entry["attention_temp_distribution"] = temp_ranges
+                            avg_drift = sum(s.get("centroid_drift", 0) for s in attention_srcs) / len(attention_srcs)
+                            periodic_entry["avg_drift"] = round(avg_drift, 3)
+                        self._log_presence_event_raw(periodic_entry)
         except Exception:
             import traceback
             append_log(f"V2 scheduled check error: {traceback.format_exc()}")
@@ -1429,13 +1453,40 @@ class snarlingCreature:
                 departure_log_entry["prox_peak"] = round(self._proximity_peak, 2)
             if self._zone_flip_count > 0:
                 departure_log_entry["zone_flips"] = self._zone_flip_count
+            # Add attention source data at departure for lifecycle tracking
+            if self._v2_world_state is not None:
+                try:
+                    snapshot = self._v2_world_state.get_snapshot()
+                    sources = snapshot.get("sources", {})
+                    attention_sources = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                    departure_log_entry["source_count"] = len(sources)
+                    departure_log_entry["attention_sources"] = len(attention_sources)
+                except Exception:
+                    pass  # V2 never blocks V1
             self._log_presence_event_raw(departure_log_entry)
 
         self._post_environmental_event(event_data)
 
         # Log arrival presence event to local file (departures logged above)
         if present:
-            self._log_presence_event(event_data)
+            # Add attention source data at arrival for lifecycle tracking
+            arrival_entry = {
+                "ts": int(time.time()),
+                "type": "presence_change",
+                "p": 1,
+            }
+            if event_data.get("absent_duration_sec") is not None:
+                arrival_entry["abs"] = event_data["absent_duration_sec"]
+            if self._v2_world_state is not None:
+                try:
+                    snapshot = self._v2_world_state.get_snapshot()
+                    sources = snapshot.get("sources", {})
+                    attention_sources = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                    arrival_entry["source_count"] = len(sources)
+                    arrival_entry["attention_sources"] = len(attention_sources)
+                except Exception:
+                    pass
+            self._log_presence_event_raw(arrival_entry)
 
         if present:
             # Start settling timer — fire presence_settled after 60s of stable presence
@@ -1560,13 +1611,10 @@ class snarlingCreature:
             minutes = int((seconds % 3600) // 60)
             return f"{hours}h{minutes}m" if minutes else f"{hours}h"
 
-    def _update_presence_db(self, present, presence_state, confidence="high"):
+    def _update_presence_db(self, present, confidence="high"):
         """Write deterministic presence fields directly to presence.db.
-        This eliminates the bug where the LLM agent fails to update presence.db
-        because it never receives push events (the session is done between heartbeats).
- Only writes deterministic fields: present, presence_state, since, last_seen,
-         presence_confidence, updated_at. Leaves environment_summary and
-         environment_summary_updated_at untouched — the agent owns those."""
+        Only writes: present, since, last_seen, presence_confidence, updated_at.
+        Leaves environment_summary and environment_summary_updated_at untouched — the agent owns those."""
         db_path = "/home/openpi/.openclaw/workspace-environmental/memory/presence.db"
         try:
             import sqlite3 as _sql
@@ -1574,86 +1622,56 @@ class snarlingCreature:
             cur = conn.cursor()
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
 
-                         # Read current row to preserve environment_summary + its timestamp
+            # Read current row to preserve environment_summary + its timestamp
             cur.execute("SELECT environment_summary, environment_summary_updated_at FROM presence WHERE id = 1")
             row = cur.fetchone()
             old_summary = row[0] if row else "environment_stable"
             old_summary_ts = row[1] if row and row[1] else ""
 
-            # presence.db only stores confirmed states: settled or absent.
-            # Internal transient states (arrived, departing) are mapped to the
-            # previous confirmed state until snarling is confident enough.
-            # arrived → don't write yet (person detected but not stable 60s)
-            # departing → absent (person gone, transitional state not meaningful)
-            # settled → settled (confirmed stable presence)
-            # absent → absent (confirmed absence)
-            if not present:
-                db_presence_state = "absent"
-            elif presence_state == "settled":
-                db_presence_state = "settled"
-            else:
-                # arrived or other transient state — skip the write entirely.
-                # presence.db already has the last confirmed state.
-                db_presence_state = None
-
-            if db_presence_state is None:
-                # Skip presence_state write for transient states (arrived, etc.)
-                # but still update present, last_seen, and updated_at so consumers know
-                # someone is detected even before we confirm they're settled.
-                cur.execute("""UPDATE presence SET
-                    present = ?,
-                    last_seen = ?,
-                    updated_at = ?
-                WHERE id = 1""", (1 if present else 0, now_iso, now_iso))
-            elif present:
+            if present:
                 # Arriving: since = arrival time (always reset on arrival)
                 cur.execute("""UPDATE presence SET
                     present = ?,
-                    presence_state = ?,
                     since = ?,
                     last_seen = ?,
                     presence_confidence = ?,
-                     environment_summary = ?,
-                     environment_summary_updated_at = ?,
-                     updated_at = ?
-                 WHERE id = 1""", (
-                     1,
-                    db_presence_state,
+                    environment_summary = ?,
+                    environment_summary_updated_at = ?,
+                    updated_at = ?
+                WHERE id = 1""", (
+                    1,
                     now_iso,  # since: arrival time
                     now_iso,  # last_seen
-                     confidence,
-                     old_summary,  # preserve agent's interpretive label
-                     old_summary_ts,  # preserve agent's timestamp
-                     now_iso,  # updated_at
+                    confidence,
+                    old_summary,  # preserve agent's interpretive label
+                    old_summary_ts,  # preserve agent's timestamp
+                    now_iso,  # updated_at
                 ))
             else:
                 # Departing/absent: since = when absence started
-                # Use _last_absence_time if available, otherwise now
                 absence_since = now_iso
                 if self._last_absence_time is not None:
                     absence_since = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(self._last_absence_time))
                 cur.execute("""UPDATE presence SET
                     present = ?,
-                    presence_state = ?,
                     since = ?,
                     last_seen = ?,
                     presence_confidence = ?,
-                     environment_summary = ?,
-                     environment_summary_updated_at = ?,
-                     updated_at = ?
-                 WHERE id = 1""", (
-                     0,
-                    db_presence_state,  # mapped: arrived->absent, settled->settled, absent->absent
-                     absence_since,    # when absence started
-                     now_iso,          # last_seen = now
-                     confidence,
-                     old_summary,  # preserve agent's interpretive label
-                     old_summary_ts,  # preserve agent's timestamp
-                     now_iso,  # updated_at
+                    environment_summary = ?,
+                    environment_summary_updated_at = ?,
+                    updated_at = ?
+                WHERE id = 1""", (
+                    0,
+                    absence_since,    # when absence started
+                    now_iso,          # last_seen = now
+                    confidence,
+                    old_summary,  # preserve agent's interpretive label
+                    old_summary_ts,  # preserve agent's timestamp
+                    now_iso,  # updated_at
                 ))
             conn.commit()
             conn.close()
-            append_log(f"presence.db updated: present={present}, state={presence_state}")
+            append_log(f"presence.db updated: present={present}")
         except Exception as e:
             append_log(f"presence.db write failed: {e}")
 
@@ -1672,19 +1690,28 @@ class snarlingCreature:
         append_log(f"_post_env: type={event_type}, present={event_present}, settled={self._is_settled}")
         if event_present is not None:
             if event_type == "presence_settled":
-                self._update_presence_db(present=True, presence_state="settled")
+                self._update_presence_db(present=True)
+            elif event_type == "thermal_alert":
+                # Attention threshold not met — do NOT write to presence.db
+                # presence.db stays absent. thermal_alert goes to agent for classification.
+                pass  # no DB write for thermal alerts
             elif event_type == "presence_change":
                 if event_present:
-                    self._update_presence_db(present=True, presence_state="arrived")
+                    self._update_presence_db(present=True)
                 else:
-                    self._update_presence_db(present=False, presence_state="absent")
+                    self._update_presence_db(present=False)
             elif event_type == "observation_report":
-                # Observation reports: just update last_seen and updated_at
+                # Observation reports: update present based on settled state
                 if event_present:
-                    state = "settled" if self._is_settled else "arrived"
-                    self._update_presence_db(present=True, presence_state=state)
+                    self._update_presence_db(present=True)
                 else:
-                    self._update_presence_db(present=False, presence_state="absent")
+                    self._update_presence_db(present=False)
+
+        # Don't send thermal_alert events to the environmental agent yet.
+        # They're logged locally but not forwarded until Stage 3 is ready.
+        if event_data.get("trigger_reason") == "thermal_alert":
+            append_log(f"thermal_alert: logged locally, not forwarded to agent (Stage 3 pending)")
+            return
 
         try:
             import requests as req_lib
@@ -1741,9 +1768,32 @@ class snarlingCreature:
 
     def _on_presence_settled(self):
         """Called 60 seconds after stable presence detected.
-        Fires observation_report with trigger_reason='presence_settled'.
-        V1 presence_settled event removed — V2 observation_report is the superset."""
-        self._is_settled = True
+        Fires observation_report with trigger_reason='presence_settled' if
+        attention_sources >= ATTENTION_THRESHOLD, otherwise rejects settlement
+        and fires thermal_alert instead of presence_settled."""
+        ATTENTION_THRESHOLD = 4  # minimum attention sources for confirmed presence
+
+        # Check attention threshold before promoting to settled
+        n_attention = 0
+        attention_passed = True  # default to pass if V2 unavailable
+        if self._v2_world_state is not None:
+            try:
+                snapshot = self._v2_world_state.get_snapshot()
+                sources = snapshot.get("sources", {})
+                attention_sources_list = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                n_attention = len(attention_sources_list)
+                attention_passed = n_attention >= ATTENTION_THRESHOLD
+            except Exception as e:
+                append_log(f"presence_settled attention check error: {e}")
+
+        if attention_passed:
+            self._is_settled = True
+            settled_type = "presence_settled"
+        else:
+            # Not enough attention sources — reject settlement, stay approaching
+            append_log(f"thermal_alert: {n_attention} attention sources < {ATTENTION_THRESHOLD} threshold, not a confirmed person")
+            settled_type = "thermal_alert"
+
         absent_sec = self._last_absence_duration_sec
         absent_str = self._format_duration(absent_sec) if absent_sec else None
 
@@ -1752,10 +1802,10 @@ class snarlingCreature:
         if self._approach_start_time is not None:
             approach_sec = round(time.time() - self._approach_start_time, 1)
 
-        # Log settled event locally (for audit trail)
+        # Log settled/rejected event locally (for audit trail)
         settled_log_entry = {
             "ts": int(time.time()),
-            "type": "presence_settled",
+            "type": settled_type,
             "abs": absent_sec if absent_sec else 0,
         }
         if approach_sec is not None:
@@ -1764,21 +1814,53 @@ class snarlingCreature:
             settled_log_entry["prox_peak"] = round(self._proximity_peak, 2)
         if self._zone_flip_count > 0:
             settled_log_entry["zone_flips"] = self._zone_flip_count
+
+        # Add attention source data for threshold tuning
+        if self._v2_world_state is not None:
+            try:
+                snapshot = self._v2_world_state.get_snapshot()
+                sources = snapshot.get("sources", {})
+                established = [s for s in sources.values() if s.get("observation_count", 0) >= 3]
+                attention_sources = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                settled_log_entry["source_count"] = len(sources)
+                settled_log_entry["established_sources"] = len(established)
+                settled_log_entry["attention_sources"] = len(attention_sources)
+                # Temperature distribution: group attention sources by peak temp range
+                if attention_sources:
+                    temp_ranges = {"body_range": 0, "warm_range": 0, "hot_range": 0}
+                    for s in attention_sources:
+                        peak = s.get("peak_temp", 0)
+                        if peak >= 40:
+                            temp_ranges["hot_range"] += 1  # burners, oven
+                        elif peak >= 34:
+                            temp_ranges["warm_range"] += 1  # warm objects
+                        else:
+                            temp_ranges["body_range"] += 1  # body temp range
+                    settled_log_entry["attention_temp_distribution"] = temp_ranges
+                    # Average drift and stability of attention sources
+                    avg_drift = sum(s.get("centroid_drift", 0) for s in attention_sources) / len(attention_sources)
+                    settled_log_entry["avg_drift"] = round(avg_drift, 3)
+                else:
+                    settled_log_entry["attention_temp_distribution"] = {"body_range": 0, "warm_range": 0, "hot_range": 0}
+            except Exception as e:
+                append_log(f"attention_log error in settled event: {e}")
+
         self._log_presence_event_raw(settled_log_entry)
 
-        # Fire V2 observation_report with trigger_reason='presence_settled'
-        # This replaces the V1 presence_settled event — it carries all the same
-        # data (absent_duration, absent_duration_sec) plus world_state and changes.
+        # Fire V2 observation_report with appropriate trigger_reason
+        # If attention_passed, trigger is 'presence_settled' (confirmed presence)
+        # If rejected, trigger is 'thermal_alert' (thermal activity but not enough attention)
+        v2_trigger_reason = settled_type  # 'presence_settled' or 'thermal_alert'
         if self._v2_trigger_scheduler is not None and self._v2_world_state is not None:
             try:
                 snapshot = self._v2_world_state.get_snapshot()
                 event = self._v2_trigger_scheduler.on_presence_settled(snapshot)
                 if event is not None:
                     # Agent context: distilled view without histories
-                    agent_context = self._v2_world_state.get_agent_context("presence_settled")
+                    agent_context = self._v2_world_state.get_agent_context(v2_trigger_reason)
                     v2_event = {
                         "type": "observation_report",
-                        "trigger_reason": "presence_settled",
+                        "trigger_reason": v2_trigger_reason,
                         "present": True,
                         "absent_duration": event.absent_duration,
                         "absent_duration_sec": event.absent_duration_sec,
@@ -1786,23 +1868,23 @@ class snarlingCreature:
                         "changes_since_last": event.changes_since_last,
                         "timestamp": event.timestamp,
                     }
-                    append_log(f"presence_settled → _post_env: type={v2_event.get('type')}, present={v2_event.get('present')}")
+                    append_log(f"{v2_trigger_reason} → _post_env: type={v2_event.get('type')}, present={v2_event.get('present')}, attention={'PASS' if attention_passed else 'REJECT'}")
                     self._post_environmental_event(v2_event)
-                    n_sources = agent_context.get("summary", {}).get("source_count", "?")
-                    n_attention = len(agent_context.get("attention_sources", []))
-                    # Stage 1: Log attention threshold check (no behavior change yet)
-                    ATTENTION_THRESHOLD = 4  # proposed threshold for presence_settled
-                    GRACE_PERIOD = 300  # 5 minutes after startup — sources not yet established
-                    elapsed_since_startup = time.time() - self._startup_time
-                    if elapsed_since_startup < GRACE_PERIOD:
-                        append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention, threshold_check=SKIP (grace period, {elapsed_since_startup:.0f}s since startup)")
-                    else:
-                        would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
-                        append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
             except Exception as e:
-                append_log(f"V2 presence_settled error: {e}")
+                append_log(f"V2 {v2_trigger_reason} error: {e}")
 
-        print(f"[snarling] Presence settled (absent for {absent_str or 'unknown'} before return)")
+        print(f"[snarling] Presence {'settled' if attention_passed else 'REJECTED (not enough attention sources)'} (absent for {absent_str or 'unknown'} before return)")
+
+        # If attention threshold was rejected, retry settling in 30 seconds
+        # This handles the case where sources need more time to establish
+        # (e.g., person just walked in and sources are still accumulating)
+        if not attention_passed:
+            if self._settling_timer is not None:
+                self._settling_timer.cancel()
+            self._settling_timer = threading.Timer(30.0, self._on_presence_settled)
+            self._settling_timer.daemon = True
+            self._settling_timer.start()
+            append_log("thermal_alert: retrying settlement check in 30s")
 
     # ── End thermal callbacks ───────────────────────────────────────
 
