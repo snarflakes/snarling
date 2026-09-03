@@ -2749,7 +2749,7 @@ class snarlingCreature:
                 print(f"[snarling] Thermal sensor start failed: {e}")
                 self._thermal_available = False
 
-        target_fps = 30
+        target_fps = 10
         frame_time = 1.0 / target_fps
 
         try:
