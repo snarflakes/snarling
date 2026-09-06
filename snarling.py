@@ -52,9 +52,12 @@ def _gateway_ws_url():
     return f"{ws_base}/ws"
 
 if not GATEWAY_TOKEN:
-    print("[snarling] WARNING: OPENCLAW_GATEWAY_TOKEN not set — approval/notification "
-          "callbacks, environmental events, and voice input will fail auth. "
-          'Set it in snarling.env (see README "Configure the gateway token").')
+    raise RuntimeError(
+        "OPENCLAW_GATEWAY_TOKEN is not set. "
+        "For systemd installs, configure /etc/snarling.env "
+        '(see README "Configure the gateway token"). '
+        "For manual runs: OPENCLAW_GATEWAY_TOKEN=*** python snarling.py"
+    )
 
 # Screen dimensions
 WIDTH = DisplayHATMini.WIDTH

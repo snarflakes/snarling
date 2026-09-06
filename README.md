@@ -360,7 +360,7 @@ Options you can also set there:
 | `OPENCLAW_GATEWAY_TOKEN` | *(none)* | Gateway auth token — required for approval/notification callbacks |
 | `OPENCLAW_GATEWAY_URL` | `http://localhost:18789` | Gateway base URL (change if yours runs elsewhere/another port) |
 
-If the token is missing, Snarling still renders and accepts `/state` updates from the plugin, but logs a warning at startup and callbacks (approvals, notifications, voice) will fail auth.
+If the token is missing, Snarling refuses to start with a clear error — the service intentionally stays down until the credential is configured. Once set, Snarling renders and accepts `/state` updates from the plugin, and callbacks (approvals, notifications, voice) authenticate automatically.
 
 ### 2. Install the Interaction Bridge Plugin
 
