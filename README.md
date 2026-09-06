@@ -98,13 +98,44 @@ Short messages get 2 banners. Longer messages get all 3.
 Snarling has a built-in microphone input flow via the **X button**. When pressed in normal state (not during an approval or notification), Snarling:
 
 1. Enters **listening** state (teal face, pulsing fill bars, `🎙 Listening...` message)
-2. Records 20 seconds of audio locally via `arecord` (no gateway dependency for recording)
+2. Records audio locally via `arecord` with **Silero VAD** speech detection — recording starts when you begin speaking and ends ~1.5s after you stop (no gateway dependency, no fixed duration)
 3. Switches to **processing** state (`⏱ Thinking...`) while POSTing the WAV path to the plugin's `/transcribe-and-reply` endpoint
 4. The plugin transcribes the audio and injects it as a voice system event into the agent's session
 5. On success, the plugin drives state transitions back to sleeping via the `/state` API
 6. On failure, Snarling falls back to sleeping
 
-The mic is checked at startup — if no audio input device is found (`plughw:3,0`), the X button shows `No mic found` instead of starting a recording. The WAV file is cleaned up after 60 seconds to give the plugin time to read it.
+### VAD Recording Behavior
+
+- Capture starts immediately on X press; up to **5s** waits for speech to begin
+- Once speech starts, recording continues while you speak (short pauses inside sentences don't stop it)
+- Recording stops after **1.5s** of continuous trailing silence, or at a **30s** absolute max
+- ~0.4s of pre-speech audio is kept so first words aren't clipped
+- No speech (or under 0.25s of it) → no transcription request; display shows `🔇 No speech detected` and returns to idle
+- The mic is checked at startup — if no audio input device is found (`plughw:3,0`), the X button shows `No mic found` instead of starting a recording
+- The WAV file is cleaned up after 60 seconds to give the plugin time to read it
+
+### VAD Settings (env-overridable)
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `VAD_ENABLED` | `true` | Silero VAD speech detection on/off |
+| `VAD_THRESHOLD` | `0.5` | Speech probability to start recording (stop hysteresis is 0.7× this) |
+| `VAD_SPEECH_START_TIMEOUT` | `5.0` | Seconds to wait for speech to begin |
+| `VAD_SILENCE_STOP_SEC` | `1.5` | Trailing silence before recording stops |
+| `VAD_MAX_RECORD_SEC` | `30.0` | Absolute maximum recording length |
+| `VAD_MIN_SPEECH_SEC` | `0.25` | Minimum detected speech (rejects clicks/bumps) |
+| `VAD_PRE_ROLL_SEC` | `0.4` | Audio kept before speech onset |
+| `VAD_TAIL_SEC` | `0.2` | Audio kept after speech ends |
+| `VAD_FALLBACK_RECORD_SEC` | `20.0` | Fixed duration when VAD is disabled/unavailable |
+| `VAD_MODEL_PATH` | *(auto)* | Explicit path to `silero_vad.onnx` (auto-locates the pip-bundled model) |
+
+### VAD Dependencies
+
+```bash
+/home/<user>/<env>/bin/pip install --no-deps onnxruntime silero-vad
+```
+
+`--no-deps` matters: `silero-vad`'s default dependencies pull PyTorch and NVIDIA CUDA wheels (gigabytes) that the Pi doesn't need. The ONNX model ships inside the `silero-vad` wheel (~2.3 MB); `onnxruntime` runs it on CPU at roughly **1.7 ms per 32 ms chunk** — negligible load on a Pi 4. Recording works fully offline after installation. If VAD can't initialize, the exact reason is logged and recording falls back to the fixed duration (`VAD_FALLBACK_RECORD_SEC`), so voice input never breaks — it just records the old way.
 
 ## Physical Approvals
 
@@ -269,8 +300,8 @@ This log enables the environmental agent to build rolling statistics over time �
 │              │                    │  (presence_change + settled)     │              │
 │              │                    │                                  │              │
 │              │                    │  X button press:                 │              │
-│              │                    │  🎙 arecord (local) ────────────┠ │              │
-│              │                    │  20s WAV → plugin transcribes    │  /transcribe  │
+│              │                    │  🎙 arecord + Silero VAD ────────┠ │              │
+│              │                    │  speech WAV → plugin transcribes │  /transcribe  │
 └────────────┘                    │                                  └───────────┘
                                   │
                                   │  ┌─────────────────────────┐
@@ -289,13 +320,13 @@ This log enables the environmental agent to build rolling statistics over time �
 5. When you press A (approve/reveal) or B (reject/dismiss), Snarling POSTs the decision or feedback back to the OpenClaw gateway
 6. Snarling sends a WebSocket RPC wake to bypass the gateway's `requests-in-flight` check
 7. When the thermal sensor detects presence changes, Snarling POSTs to the gateway's `/environmental-event` route
-8. **X button** starts local audio recording (`arecord`, 20s), then POSTs the WAV path to the plugin's `/transcribe-and-reply` endpoint for transcription and agent injection
+8. **X button** starts local audio recording (`arecord` + Silero VAD speech detection — records while you speak, stops after trailing silence), then POSTs the WAV path to the plugin's `/transcribe-and-reply` endpoint for transcription and agent injection
 
 ### Components
 
 | File | Purpose |
 |------|----------|
-| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server, voice input, approval/notification queueing, thermal callbacks, environmental event posting, presence session tracking, presence.db direct writes, data logging |
+| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server, voice input (Silero VAD–controlled recording), approval/notification queueing, thermal callbacks, environmental event posting, presence session tracking, presence.db direct writes, data logging |
 | `thermal.py` | ThermalSensor class — MLX90640 daemon thread, frame processing, blob detection, dual debounce (fast display / slow gateway), presence/proximity callbacks |
 
 ## Hardware

@@ -90,6 +90,23 @@ COLOR_STATUS_DIM = (60, 60, 80)    # Dim/off status boxes
 COLOR_BANNER_BG = (42, 42, 62)    # Slightly lighter dark for banner area #2A2A3E
 COLOR_SEPARATOR = (255, 255, 255)  # White separator line
 
+# ── Voice VAD configuration ────────────────────────────────────────────────
+# Silero VAD–controlled recording: X button records while you speak, stopping
+# after trailing silence instead of a fixed duration. All values env-overridable.
+# Fallback when VAD is disabled/unavailable: fixed-duration recording.
+VAD_ENABLED = os.environ.get("VAD_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+VAD_THRESHOLD = float(os.environ.get("VAD_THRESHOLD", "0.5"))          # speech prob to START speech
+VAD_THRESHOLD_STOP = VAD_THRESHOLD * 0.7                                # hysteresis: prob to stay in speech
+VAD_SPEECH_START_TIMEOUT = float(os.environ.get("VAD_SPEECH_START_TIMEOUT", "5.0"))  # wait for speech to begin
+VAD_SILENCE_STOP_SEC = float(os.environ.get("VAD_SILENCE_STOP_SEC", "1.5"))          # trailing silence to stop
+VAD_MAX_RECORD_SEC = float(os.environ.get("VAD_MAX_RECORD_SEC", "30.0"))             # absolute cap
+VAD_MIN_SPEECH_SEC = float(os.environ.get("VAD_MIN_SPEECH_SEC", "0.25"))             # reject clicks/bumps
+VAD_PRE_ROLL_SEC = float(os.environ.get("VAD_PRE_ROLL_SEC", "0.4"))                 # audio kept before speech onset
+VAD_TAIL_SEC = float(os.environ.get("VAD_TAIL_SEC", "0.2"))                          # audio kept after speech ends
+VAD_FALLBACK_RECORD_SEC = float(os.environ.get("VAD_FALLBACK_RECORD_SEC", "20.0"))  # fixed duration fallback
+VAD_SAMPLE_RATE = 16000                   # Silero-native; WAV stays OpenAI-compatible
+VAD_CHUNK_SAMPLES = 512                   # 32 ms at 16 kHz — Silero's required chunk size
+
 # Design system dimensions
 BORDER_MARGIN = 5             # Outer border margin from screen edges
 BORDER_RADIUS = 18            # Outer border corner radius
@@ -113,6 +130,100 @@ NOTIFY_LED_COLORS = {
 }
 
 # Pwnagotchi-style ASCII face expressions with animations
+
+class SileroVAD:
+    """Silero VAD via ONNX Runtime — no torch dependency.
+
+    Uses the official silero_vad.onnx bundled with the silero-vad pip package.
+    Hand-rolled session/state handling (the package's own OnnxWrapper imports torch).
+    Chunked streaming API: feed 512-sample (32 ms @ 16 kHz) PCM16 chunks.
+
+    Fails soft: __init__ records the reason in self.error; callers check .ok.
+    """
+
+    CHUNK = 512      # samples @ 16 kHz
+    CONTEXT = 64     # context samples carried between chunks (per Silero spec)
+
+    def __init__(self):
+        self.error = None
+        self._session = None
+        self._h = None
+        self._ctx = None
+        try:
+            import numpy as np
+            import onnxruntime
+            global np
+            self._np = np
+            opts = onnxruntime.SessionOptions()
+            opts.inter_op_num_threads = 1
+            opts.intra_op_num_threads = 1   # Pi: single thread is fastest + lightest
+            model_path = self._locate_model()
+            if not model_path:
+                self.error = "silero_vad.onnx model not found (pip install silero-vad --no-deps)"
+                return
+            self._session = onnxruntime.InferenceSession(
+                model_path, providers=['CPUExecutionProvider'], sess_options=opts)
+            self.reset()
+        except Exception as e:
+            self.error = f"{type(e).__name__}: {e}"
+            self._session = None
+
+    @staticmethod
+    def _locate_model():
+        """Find silero_vad.onnx — bundled with silero-vad wheel, or env override."""
+        candidates = []
+        env_path = os.environ.get("VAD_MODEL_PATH")
+        if env_path:
+            candidates.append(env_path)
+        # silero-vad package dir (importlib approach fails when the package's
+        # __init__ imports torch — locate the wheel path directly instead)
+        for site in sys.path:
+            cand = os.path.join(site, 'silero_vad', 'data', 'silero_vad.onnx')
+            candidates.append(cand)
+        for c in candidates:
+            if c and os.path.exists(c):
+                return c
+        return None
+
+    @property
+    def ok(self):
+        return self._session is not None
+
+    def reset(self):
+        """Reset RNN state for a new recording session."""
+        n = self._np
+        self._h = n.zeros((2, 1, 128), dtype=n.float32)
+        self._ctx = n.zeros((1, self.CONTEXT), dtype=n.float32)
+
+    def prob(self, pcm_int16_chunk):
+        """Speech probability for one 512-sample PCM16 chunk (32 ms @ 16 kHz)."""
+        n = self._np
+        x = n.frombuffer(pcm_int16_chunk, dtype=n.int16).astype(n.float32) / 32768.0
+        x = x.reshape(1, -1)
+        full = n.concatenate([self._ctx, x], axis=1)
+        out, h_new = self._session.run(None, {
+            'input': full,
+            'state': self._h,
+            'sr': n.array(16000, dtype=n.int64),
+        })
+        self._h = h_new
+        self._ctx = full[:, -self.CONTEXT:]
+        return float(out[0][0])
+
+
+def _find_vad():
+    """Create a SileroVAD if enabled and available; log outcome. Returns (vad, None) or (None, reason)."""
+    if not VAD_ENABLED:
+        return None, "VAD_ENABLED=false"
+    try:
+        vad = SileroVAD()
+    except Exception as e:
+        return None, f"VAD init exception: {e}"
+    if not vad.ok:
+        return None, vad.error or "unknown VAD init failure"
+    return vad, None
+
+    """Pwnagotchi-style Unicode face expressions"""
 
 class FaceExpressions:
     """Pwnagotchi-style Unicode face expressions"""
@@ -178,6 +289,7 @@ class FaceExpressions:
         elif priority == 'low':
             return cls.NOTIFY_LOW
         return cls.NOTIFY_NORMAL
+
 
 class snarlingCreature:
     """Main creature class"""
@@ -1101,42 +1213,188 @@ class snarlingCreature:
         self.status_timer = 60
 
     def trigger_voice_input(self):
-        """Record audio locally, then POST WAV path to plugin for transcription"""
+        """Record audio locally (Silero VAD–controlled when available), then POST WAV path to plugin"""
         import threading
         import subprocess
 
         self.state = STATE_LISTENING
         self.status_message = "🎙 Listening..."
-        self.status_timer = 360  # Show for ~12 seconds
+        self.status_timer = 900  # 30s cap covers max VAD recording window
         self.led_timer = 10
 
         def _record_and_post():
-            """Record audio in background thread, then POST path to plugin"""
+            """Record audio in background thread, then POST path to plugin.
+
+            VAD mode (default): stream 16 kHz PCM from arecord, evaluate Silero VAD
+            per 32 ms chunk, start on speech, stop after trailing silence. Falls
+            back to fixed-duration recording when VAD is disabled or unavailable.
+            """
+            wav_path = f"/tmp/voice_recording.{int(time.time())}.wav"
+            vad = None
+            vad_reason = None
+            proc = None
             try:
-                wav_path = f"/tmp/voice_recording.{int(time.time())}.wav"
-                duration = 20
+                vad, vad_reason = _find_vad()
+                if vad is not None:
+                    vad.reset()
+                    print(f"[snarling] VAD active (threshold={VAD_THRESHOLD}, silence_stop={VAD_SILENCE_STOP_SEC}s, max={VAD_MAX_RECORD_SEC}s)")
+                    try: append_log(f"VAD active: {vad_reason}")
+                    except: pass
+                else:
+                    print(f"[snarling] VAD unavailable ({vad_reason}) — fixed {VAD_FALLBACK_RECORD_SEC:.0f}s recording")
+                    try: append_log(f"VAD fallback: {vad_reason}")
+                    except: pass
+
                 device = "plughw:3,0"
 
-                # Step 1: Record immediately (no gateway dependency)
-                print(f"[snarling] Starting arecord: {duration}s from {device}")
-                try: append_log(f"arecord start {duration}s")
+                # Step 1: Start recording immediately (no gateway dependency)
+                print(f"[snarling] Starting arecord: from {device} @ {VAD_SAMPLE_RATE}Hz")
+                try: append_log(f"arecord start (vad={vad is not None})")
                 except: pass
 
-                result = subprocess.run(
-                    ["arecord", "-D", device, "-f", "S16_LE", "-c", "1", "-r", "24000", "-d", str(duration), wav_path],
-                    capture_output=True, timeout=duration + 5
+                proc = subprocess.Popen(
+                    ["arecord", "-D", device, "-f", "S16_LE", "-c", "1",
+                     "-r", str(VAD_SAMPLE_RATE), "-t", "raw", "-q"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
                 )
 
-                if result.returncode != 0:
-                    print(f"[snarling] arecord failed: {result.stderr.decode()[:200]}")
-                    try: append_log(f"arecord failed: {result.stderr.decode()[:100]}")
-                    except: pass
-                    self.state = STATE_SLEEPING
-                    self.led_timer = 0
+                if vad is None:
+                    # ── Fallback: fixed-duration recording (original behavior) ──
+                    # VAD unavailable — run the proven pre-VAD path directly to file.
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except Exception:
+                        proc.kill()
+                    proc = None
+                    result = subprocess.run(
+                        ["arecord", "-D", device, "-f", "S16_LE", "-c", "1",
+                         "-r", str(VAD_SAMPLE_RATE), "-d", str(int(VAD_FALLBACK_RECORD_SEC)), wav_path],
+                        capture_output=True, timeout=VAD_FALLBACK_RECORD_SEC + 5
+                    )
+                    if result.returncode != 0:
+                        print(f"[snarling] arecord failed: {result.stderr.decode()[:200]}")
+                        try: append_log(f"arecord failed: {result.stderr.decode()[:100]}")
+                        except: pass
+                        self.state = STATE_SLEEPING
+                        self.led_timer = 0
+                        return
+                    self._post_voice_wav(wav_path)
                     return
 
-                print(f"[snarling] arecord complete: {wav_path}")
-                try: append_log(f"arecord complete, posting to plugin")
+                # ── VAD-controlled recording ──
+                import time as _t
+                import wave as _wave
+                n = vad._np
+                bytes_per_chunk = VAD_CHUNK_SAMPLES * 2   # 16-bit mono
+                chunk_sec = VAD_CHUNK_SAMPLES / VAD_SAMPLE_RATE  # 0.032s
+
+                pre_roll_chunks = max(1, int(round(VAD_PRE_ROLL_SEC / chunk_sec)))
+                tail_chunks = max(1, int(round(VAD_TAIL_SEC / chunk_sec)))
+                start_timeout_chunks = int(VAD_SPEECH_START_TIMEOUT / chunk_sec)
+                silence_stop_chunks = int(VAD_SILENCE_STOP_SEC / chunk_sec)
+                max_chunks = int(VAD_MAX_RECORD_SEC / chunk_sec)
+                min_speech_chunks = max(1, int(VAD_MIN_SPEECH_SEC / chunk_sec))
+
+                # Ring buffer for pre-roll (list of 512-sample chunks)
+                pre_roll = []
+                speech_chunks = 0          # total speech chunks detected
+                in_speech = False
+                silence_run = 0            # consecutive silence chunks after speech began
+                started_at = None          # monotonic time speech began
+                chunks_seen = 0
+                speech_frames = []         # audio frames collected since speech onset (bytes)
+                outcome = "no_speech"
+
+                t_start = _t.monotonic()
+                while True:
+                    chunk = proc.stdout.read(bytes_per_chunk)
+                    if not chunk or len(chunk) < bytes_per_chunk:
+                        # mic stream ended prematurely
+                        outcome = "mic_ended" if in_speech or speech_chunks else "no_speech"
+                        break
+                    chunks_seen += 1
+
+                    p = vad.prob(chunk)
+                    speech_like = p >= (VAD_THRESHOLD_STOP if in_speech else VAD_THRESHOLD)
+
+                    if not in_speech:
+                        pre_roll.append(chunk)
+                        if len(pre_roll) > pre_roll_chunks:
+                            pre_roll.pop(0)
+                        if speech_like:
+                            in_speech = True
+                            started_at = _t.monotonic()
+                            silence_run = 0
+                            speech_frames.extend(pre_roll)
+                            pre_roll = []
+                            speech_chunks += 1
+                            print(f"[snarling] VAD speech started (prob={p:.2f}, waited {started_at - t_start:.1f}s)")
+                            try: append_log(f"VAD speech start prob={p:.2f} wait={started_at - t_start:.1f}s")
+                            except: pass
+                        elif chunks_seen >= start_timeout_chunks:
+                            outcome = "no_speech"
+                            break
+                    else:
+                        speech_frames.append(chunk)
+                        if speech_like:
+                            speech_chunks += 1
+                            silence_run = 0
+                        else:
+                            silence_run += 1
+                        if silence_run >= silence_stop_chunks:
+                            outcome = "silence_stop"
+                            break
+                        if chunks_seen >= max_chunks:
+                            outcome = "max_time"
+                            break
+
+                # Stop arecord — terminate and reap on every path
+                if proc is not None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except Exception:
+                        proc.kill()
+                        try:
+                            proc.wait(timeout=2)
+                        except Exception:
+                            pass
+                    proc = None
+
+                elapsed = _t.monotonic() - t_start
+                speech_sec = speech_chunks * chunk_sec
+                print(f"[snarling] VAD done: outcome={outcome}, speech={speech_sec:.1f}s, total={elapsed:.1f}s")
+                try: append_log(f"VAD done: {outcome} speech={speech_sec:.1f}s total={elapsed:.1f}s")
+                except: pass
+
+                if outcome == "no_speech" or speech_sec < VAD_MIN_SPEECH_SEC:
+                    # Nothing worth transcribing — clean return to idle
+                    self.state = STATE_SLEEPING
+                    self.status_message = "🔇 No speech detected"
+                    self.status_timer = 120  # ~4 seconds
+                    self.led_timer = 0
+                    try: append_log("VAD no speech — skipped transcription")
+                    except: pass
+                    return
+
+                # Keep a little tail room after last speech (avoid clipping final word)
+                # speech_frames already contains everything since onset incl. the silence
+                # run that triggered the stop; trim only the excess beyond tail_chunks.
+                keep_frames = speech_frames[:-max(0, silence_run - tail_chunks)] if outcome == "silence_stop" and silence_run > tail_chunks else speech_frames
+                if not keep_frames:
+                    keep_frames = speech_frames
+
+                # Write WAV (16 kHz mono S16 — accepted by OpenAI transcription)
+                with _wave.open(wav_path, 'wb') as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(VAD_SAMPLE_RATE)
+                    wf.writeframes(b''.join(keep_frames))
+
+                dur = len(keep_frames) / 2 / VAD_SAMPLE_RATE
+                print(f"[snarling] WAV written: {wav_path} ({dur:.1f}s of {elapsed:.1f}s recorded)")
+                try: append_log(f"VAD wav: {dur:.1f}s written")
                 except: pass
 
                 # Show thinking state
@@ -1144,61 +1402,80 @@ class snarlingCreature:
                 self.status_message = "⏱ Thinking..."
                 self.status_timer = 360
 
-                # Step 2: POST WAV path to plugin for transcription + injection
-                import requests as req_lib
-                gateway_token = GATEWAY_TOKEN
-                url = f"{GATEWAY_URL}/transcribe-and-reply"
-                try:
-                    response = req_lib.post(
-                        url,
-                        json={"wav_path": wav_path},
-                        headers={"Authorization": f"Bearer {gateway_token}"},
-                        timeout=30,
-                    )
-                    print(f"[snarling] Transcribe response: {response.status_code} {response.text[:200]}")
-                    try: append_log(f"transcribe response: {response.status_code}")
-                    except: pass
-                    if response.status_code != 200:
-                        print(f"[snarling] Transcribe failed: {response.status_code}")
-                        try: append_log(f"transcribe failed: {response.status_code}")
-                        except: pass
-                        self.state = STATE_PROCESSING
-                        self.status_message = "⚠ No connection"
-                        self.status_timer = 120  # ~4 seconds
-                        self.led_timer = 30
-                    # On success, plugin handles state transitions via /state API
-                except Exception as e:
-                    print(f"[snarling] Transcribe POST error: {e}")
-                    try: append_log(f"transcribe error: {e}")
-                    except: pass
-                    self.state = STATE_PROCESSING
-                    self.status_message = "⚠ No internet"
-                    self.status_timer = 120  # ~4 seconds
-                    self.led_timer = 30
-
-                # Don't clean up WAV — plugin will read it async.
-                # Clean up after a delay instead.
-                import threading
-                def _cleanup_later(path, delay=60):
-                    import time
-                    time.sleep(delay)
-                    try:
-                        os.unlink(path)
-                    except:
-                        pass
-                threading.Thread(target=_cleanup_later, args=(wav_path,), daemon=True).start()
+                self._post_voice_wav(wav_path)
 
             except Exception as e:
                 print(f"[snarling] Voice input error: {e}")
                 try: append_log(f"voice error: {e}")
                 except: pass
+                # Reap arecord if still alive
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try: proc.kill()
+                        except Exception: pass
                 self.state = STATE_PROCESSING
                 self.status_message = "⚠ Voice error"
                 self.status_timer = 120  # ~4 seconds
                 self.led_timer = 30
+                return
+            finally:
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try: proc.kill()
+                        except Exception: pass
 
         voice_thread = threading.Thread(target=_record_and_post, daemon=True)
         voice_thread.start()
+
+    def _post_voice_wav(self, wav_path):
+        """POST the recorded WAV path to the plugin's /transcribe-and-reply endpoint."""
+        import requests as req_lib
+        url = f"{GATEWAY_URL}/transcribe-and-reply"
+        try:
+            response = req_lib.post(
+                url,
+                json={"wav_path": wav_path},
+                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                timeout=30,
+            )
+            print(f"[snarling] Transcribe response: {response.status_code} {response.text[:200]}")
+            try: append_log(f"transcribe response: {response.status_code}")
+            except: pass
+            if response.status_code != 200:
+                print(f"[snarling] Transcribe failed: {response.status_code}")
+                try: append_log(f"transcribe failed: {response.status_code}")
+                except: pass
+                self.state = STATE_PROCESSING
+                self.status_message = "⚠ No connection"
+                self.status_timer = 120  # ~4 seconds
+                self.led_timer = 30
+            # On success, plugin handles state transitions via /state API
+        except Exception as e:
+            print(f"[snarling] Transcribe POST error: {e}")
+            try: append_log(f"transcribe error: {e}")
+            except: pass
+            self.state = STATE_PROCESSING
+            self.status_message = "⚠ No internet"
+            self.status_timer = 120  # ~4 seconds
+            self.led_timer = 30
+
+        # Don't clean up WAV — plugin will read it async.
+        # Clean up after a delay instead.
+        import threading
+        def _cleanup_later(path, delay=60):
+            import time
+            time.sleep(delay)
+            try:
+                os.unlink(path)
+            except:
+                pass
+        threading.Thread(target=_cleanup_later, args=(wav_path,), daemon=True).start()
 
     def toggle_sleep_mode(self):
         """Toggle sleep mode for screen (replaces cycle_state)"""
