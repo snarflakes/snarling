@@ -157,9 +157,33 @@ Each presence session (from arrival to departure) tracks:
 
 On departure, this data is logged to `/tmp/presence-log.jsonl` as a compact JSON line with `dwell_sec`, `prox_peak`, and `zone_flips` fields. On `presence_settled` (60s of stable presence), the approach time and zone flips are included.
 
-### Presence Events to OpenClaw
+### Presence Data: Two Paths
 
-Snarling sends two types of presence events to the OpenClaw gateway's `/environmental-event` route:
+Snarling delivers presence data through **two independent paths**:
+
+1. **Direct DB write** — Snarling writes deterministic fields to `presence.db` immediately on every presence change. This is the ground truth source.
+2. **Gateway event** — Snarling POSTs events to the OpenClaw gateway's `/environmental-event` route for agents that can receive push events.
+
+The direct DB write path exists because gateway push events are silently lost when the agent session is `done` between heartbeats (see OpenClaw bug #86090). The DB write guarantees presence data stays current regardless of agent state.
+
+#### Direct DB Write (presence.db)
+
+Snarling writes to a SQLite database at `/home/openpi/.openclaw/workspace-environmental/memory/presence.db` on every presence event:
+
+| Field | Written by | Description |
+|-------|-----------|-------------|
+| `present` | Snarling | `1` if someone is detected, `0` if absent |
+| `presence_state` | Snarling | `settled` (stable 60s+) or `absent` — transient states (`arrived`, `departing`) are **not** written to DB; they're held in the previous confirmed state until settling completes |
+| `since` | Snarling | When the current state started. For presence: arrival time (preserved across updates via COALESCE). For absence: departure time. |
+| `last_seen` | Snarling | Timestamp of most recent detection (updates on every event) |
+| `presence_confidence` | Snarling | `high`, `medium`, or `low` — sensor confidence level |
+| `environment_summary` | Agent | Behavioral label (e.g., `mobile_thermal_phenomenon`, `environment_stable`). Snarling preserves this field — it never overwrites it. |
+| `environment_summary_updated_at` | Agent | Timestamp of last agent update to `environment_summary`. Snarling preserves this field. |
+| `updated_at` | Snarling | Timestamp of most recent snarling DB write |
+
+**Transient state handling**: When someone first arrives (thermal detection), snarling immediately writes `present=1` but leaves `presence_state` unchanged. Only after 60 seconds of stable presence does it write `presence_state=settled`. This prevents brief detections from overwriting a confirmed state.
+
+#### Gateway Events
 
 #### `presence_change` (arrival/departure)
 
@@ -197,6 +221,8 @@ This is the signal the agent uses for "someone is home and staying" — useful f
 
 These events are routed to the agent via the OpenClaw Interaction Bridge plugin (see Configuration below). The plugin handles V1/V2 compatibility — `presence_settled` events without a `trigger_reason` field are treated as `observation_report` with `trigger_reason: "presence_settled"`.
 
+**Note**: Gateway events may be silently lost when the target agent session is `done`. The direct DB write path is the reliable path; gateway events are best-effort.
+
 Proximity zone changes are **not** sent to the gateway — they're used internally by Snarling for face expressions and LED brightness only.
 
 ### Presence Data Logging
@@ -232,9 +258,9 @@ This log enables the environmental agent to build rolling statistics over time �
 │  OpenClaw    │ ───────────────── │  Snarling     │ ────────────────┠ │  OpenClaw    │
 │  (plugin)    │   /state (5000)   │  Display      │  webhook + WS    │  Gateway     │
 │              │ ───────────────── │  + Buttons    │  wake           │              │
-│              │   /approval/alert  │  + Thermal    │                  │              │
+│              │   /approval/alert │  + Thermal    │                  │              │
 │              │ ───────────────── │  + Mic        │ ──────────────┠ │              │
-│              │   /approval/alert  │               │  /approval-cb    │              │
+│              │   /approval/alert │               │  /approval-cb    │              │
 │              │   (type: notify)  │               │ ──────────────┠ │              │
 │              │                    │               │  /notification-cb │              │
 │              │                    │               │                  │              │
@@ -245,7 +271,13 @@ This log enables the environmental agent to build rolling statistics over time �
 │              │                    │  X button press:                 │              │
 │              │                    │  🎙 arecord (local) ────────────┠ │              │
 │              │                    │  20s WAV → plugin transcribes    │  /transcribe  │
-└────────────┘                    └───────────┘                  └───────────┘
+└────────────┘                    │                                  └───────────┘
+                                  │
+                                  │  ┌─────────────────────────┐
+                                  │  │  presence.db (SQLite)    │
+                                  │  │  Direct write on every  │
+                                  │  │  presence change event  │
+                                  └──┘  (ground truth source)
 ```
 
 **How it works:**
@@ -263,7 +295,7 @@ This log enables the environmental agent to build rolling statistics over time �
 
 | File | Purpose |
 |------|----------|
-| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server, voice input, approval/notification queueing, thermal callbacks, environmental event posting, presence session tracking, data logging |
+| `snarling.py` | Main creature — display rendering, face animations, button handling, Flask server, voice input, approval/notification queueing, thermal callbacks, environmental event posting, presence session tracking, presence.db direct writes, data logging |
 | `thermal.py` | ThermalSensor class — MLX90640 daemon thread, frame processing, blob detection, dual debounce (fast display / slow gateway), presence/proximity callbacks |
 
 ## Hardware

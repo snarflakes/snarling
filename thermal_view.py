@@ -140,10 +140,11 @@ def draw_thermal_view(draw, width, height, frame_data, font=None):
             temp = rotated[r * cols + c]
             color = _temp_to_color(temp, display_min, display_max)
 
-            # Col -> X (centered), Row -> Y (inverted: row 0 = bottom)
-            x0 = int(c * CELL_SCALE) + hm_offset_x
+            # Col -> X (centered, flipped horizontally for mirror-correct display), Row -> Y (inverted: row 0 = bottom)
+            fc = cols - 1 - c
+            x0 = int(fc * CELL_SCALE) + hm_offset_x
             y0 = int((rows - 1 - r) * CELL_SCALE)
-            x1 = int((c + 1) * CELL_SCALE) + hm_offset_x
+            x1 = int((fc + 1) * CELL_SCALE) + hm_offset_x
             y1 = int((rows - r) * CELL_SCALE)
 
             draw.rectangle((x0, y0, x1, y1), fill=color)
@@ -152,17 +153,18 @@ def draw_thermal_view(draw, width, height, frame_data, font=None):
     for r in range(rows):
         for c in range(cols):
             if mask[r][c]:
-                x0 = int(c * CELL_SCALE) + hm_offset_x
+                fc = cols - 1 - c
+                x0 = int(fc * CELL_SCALE) + hm_offset_x
                 y0 = int((rows - 1 - r) * CELL_SCALE)
-                x1 = int((c + 1) * CELL_SCALE) + hm_offset_x
+                x1 = int((fc + 1) * CELL_SCALE) + hm_offset_x
                 y1 = int((rows - r) * CELL_SCALE)
                 draw.rectangle((x0, y0, x1, y1), outline=(255, 255, 255), width=1)
 
     # Draw person blob rectangles
     for min_br, min_bc, max_br, max_bc, _blob in person_blobs:
-        bx0 = int(min_bc * CELL_SCALE) + hm_offset_x - 1
+        bx0 = int((cols - 1 - max_bc) * CELL_SCALE) + hm_offset_x - 1
         by0 = int((rows - 1 - max_br) * CELL_SCALE) - 1
-        bx1 = int((max_bc + 1) * CELL_SCALE) + hm_offset_x + 1
+        bx1 = int((cols - 1 - min_bc) * CELL_SCALE) + hm_offset_x + 1
         by1 = int((rows - min_br) * CELL_SCALE) + 1
         draw.rectangle((bx0, by0, bx1, by1), outline=(255, 80, 80), width=2)
 

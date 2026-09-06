@@ -161,6 +161,7 @@ class snarlingCreature:
         self.state = STATE_SLEEPING
         self.mute = False
         self.last_update = time.time()
+        # Threshold checks no longer use grace period — sources establish in ~1.5s at 2Hz, well within the 60s settle timer
         self.breath_phase = 0.0
         self.think_dots = 0
         self.talk_frame = 0
@@ -291,6 +292,7 @@ class snarlingCreature:
         self._v2_trigger_scheduler = None
         self._v2_presence_observer = None
         self._v2_last_scheduled_check = 0.0  # epoch time of last on_scheduled() call
+        self._attention_log_last_ts = 0.0  # epoch time of last periodic attention log entry
         try:
             from thermal_v2 import BlobTracker, WorldState, MeasurementExtractor, TriggerScheduler, PresenceObserver
             self._v2_tracker = BlobTracker()
@@ -935,35 +937,19 @@ class snarlingCreature:
                     self._notify_banner_index = (self._notify_banner_index + 1) % len(self._notify_banners)
 
                 try:
-                    header_font = ImageFont.truetype(
-                        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
-                    )
                     msg_font = ImageFont.truetype(
                         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
                     )
                 except OSError:
-                    header_font = ImageFont.load_default()
-                    msg_font = header_font
+                    msg_font = ImageFont.load_default()
 
                 lines = self._notify_banners[self._notify_banner_index]
-                is_banner1 = (self._notify_banner_index == 0)
 
-                if is_banner1:
-                    # Banner 1: header + preview (2 lines)
-                    total_notifications = 1 + len(self._notify_stack)
-                    if total_notifications > 1:
-                        count_indicator = f" ({1}/{total_notifications})"
-                        self.draw.text((text_left, banner_top), lines[0] + count_indicator, fill=(255, 200, 200), font=header_font)
-                    else:
-                        self.draw.text((text_left, banner_top), lines[0], fill=(255, 200, 200), font=header_font)
-                    if lines[1]:
-                        self.draw.text((text_left, banner_top + 28), lines[1], fill=(255, 255, 255), font=msg_font)
-                else:
-                    # Banner 2: word-wrapped message (3 lines)
-                    line_height = 22
-                    for i in range(min(len(lines), 3)):
-                        y = banner_top + (i * line_height)
-                        self.draw.text((text_left, y), lines[i], fill=(255, 255, 255), font=msg_font)
+                # All notification banners: 3 lines of word-wrapped text, same format
+                line_height = 22
+                for i in range(min(len(lines), 3)):
+                    y = banner_top + (i * line_height)
+                    self.draw.text((text_left, y), lines[i], fill=(255, 255, 255), font=msg_font)
             else:
                 # Show subtle hint so user knows they can interact
                 hint_text = "• A: read  B: dismiss"
@@ -1149,15 +1135,21 @@ class snarlingCreature:
                     except: pass
                     if response.status_code != 200:
                         print(f"[snarling] Transcribe failed: {response.status_code}")
-                        self.state = STATE_SLEEPING
-                        self.led_timer = 0
+                        try: append_log(f"transcribe failed: {response.status_code}")
+                        except: pass
+                        self.state = STATE_PROCESSING
+                        self.status_message = "⚠ No connection"
+                        self.status_timer = 120  # ~4 seconds
+                        self.led_timer = 30
                     # On success, plugin handles state transitions via /state API
                 except Exception as e:
                     print(f"[snarling] Transcribe POST error: {e}")
                     try: append_log(f"transcribe error: {e}")
                     except: pass
-                    self.state = STATE_SLEEPING
-                    self.led_timer = 0
+                    self.state = STATE_PROCESSING
+                    self.status_message = "⚠ No internet"
+                    self.status_timer = 120  # ~4 seconds
+                    self.led_timer = 30
 
                 # Don't clean up WAV — plugin will read it async.
                 # Clean up after a delay instead.
@@ -1175,8 +1167,10 @@ class snarlingCreature:
                 print(f"[snarling] Voice input error: {e}")
                 try: append_log(f"voice error: {e}")
                 except: pass
-                self.state = STATE_SLEEPING
-                self.led_timer = 0
+                self.state = STATE_PROCESSING
+                self.status_message = "⚠ Voice error"
+                self.status_timer = 120  # ~4 seconds
+                self.led_timer = 30
 
         voice_thread = threading.Thread(target=_record_and_post, daemon=True)
         voice_thread.start()
@@ -1270,7 +1264,8 @@ class snarlingCreature:
         try:
             self._v2_process_frame(blobs, ambient_temp)
         except Exception as e:
-            append_log(f"V2 frame data error: {e}")
+            import traceback
+            append_log(f"V2 frame data error: {e}\n{traceback.format_exc()}")
 
     def _v2_process_frame(self, blobs, ambient_temp):
         """Feed thermal frame data into V2 pipeline: tracker → measurements → world_state.
@@ -1284,11 +1279,11 @@ class snarlingCreature:
         if self._v2_tracker is None:
             return
 
-        # Log first 3 frames on startup to verify V2 pipeline is receiving data
+        # Log first 3 frames on startup, then every 1000th frame for liveness
         if not hasattr(self, '_v2_frame_count'):
             self._v2_frame_count = 0
         self._v2_frame_count += 1
-        if self._v2_frame_count <= 3:
+        if self._v2_frame_count <= 3 or self._v2_frame_count % 1000 == 0:
             append_log(f"V2 frame #{self._v2_frame_count}: {len(blobs)} blobs, ambient={ambient_temp:.1f}")
 
         try:
@@ -1325,9 +1320,42 @@ class snarlingCreature:
                     self._post_environmental_event(v2_event)
                     n_sources = agent_context.get("summary", {}).get("source_count", "?")
                     n_attention = len(agent_context.get("attention_sources", []))
-                    append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention")
+                    # Log attention threshold check for scheduled observations
+                    ATTENTION_THRESHOLD = 4
+                    would_reject = n_attention < ATTENTION_THRESHOLD if isinstance(n_attention, int) else False
+                    append_log(f"V2 observation_report (scheduled): {n_sources} sources, {n_attention} attention, threshold_check={'REJECT' if would_reject else 'PASS'} (need>={ATTENTION_THRESHOLD})")
+
+                    # Periodic attention log: every 5 minutes while present, log source data
+                    # This gives us a time series for threshold tuning, not just event boundaries
+                    if presence_active and now - self._attention_log_last_ts >= 300:
+                        self._attention_log_last_ts = now
+                        periodic_entry = {
+                            "ts": int(now),
+                            "type": "attention_periodic",
+                            "source_count": len(snapshot.get("sources", {})),
+                            "attention_sources": n_attention,
+                        }
+                        # Temperature distribution
+                        sources = snapshot.get("sources", {})
+                        attention_srcs = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                        if attention_srcs:
+                            temp_ranges = {"body_range": 0, "warm_range": 0, "hot_range": 0}
+                            for s in attention_srcs:
+                                peak = s.get("peak_temp", 0)
+                                if peak >= 40:
+                                    temp_ranges["hot_range"] += 1
+                                elif peak >= 34:
+                                    temp_ranges["warm_range"] += 1
+                                else:
+                                    temp_ranges["body_range"] += 1
+                            periodic_entry["attention_temp_distribution"] = temp_ranges
+                            avg_drift = sum(s.get("centroid_drift", 0) for s in attention_srcs) / len(attention_srcs)
+                            periodic_entry["avg_drift"] = round(avg_drift, 3)
+                        self._log_presence_event_raw(periodic_entry)
         except Exception:
-            pass  # V2 is additive — never let errors break V1
+            import traceback
+            append_log(f"V2 scheduled check error: {traceback.format_exc()}")
+            # V2 is additive — never let errors break V1
 
     def _on_thermal_presence_change(self, absent, present, ambient_temp=None):
         """Callback from thermal sensor when presence state changes.
@@ -1425,13 +1453,40 @@ class snarlingCreature:
                 departure_log_entry["prox_peak"] = round(self._proximity_peak, 2)
             if self._zone_flip_count > 0:
                 departure_log_entry["zone_flips"] = self._zone_flip_count
+            # Add attention source data at departure for lifecycle tracking
+            if self._v2_world_state is not None:
+                try:
+                    snapshot = self._v2_world_state.get_snapshot()
+                    sources = snapshot.get("sources", {})
+                    attention_sources = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                    departure_log_entry["source_count"] = len(sources)
+                    departure_log_entry["attention_sources"] = len(attention_sources)
+                except Exception:
+                    pass  # V2 never blocks V1
             self._log_presence_event_raw(departure_log_entry)
 
         self._post_environmental_event(event_data)
 
         # Log arrival presence event to local file (departures logged above)
         if present:
-            self._log_presence_event(event_data)
+            # Add attention source data at arrival for lifecycle tracking
+            arrival_entry = {
+                "ts": int(time.time()),
+                "type": "presence_change",
+                "p": 1,
+            }
+            if event_data.get("absent_duration_sec") is not None:
+                arrival_entry["abs"] = event_data["absent_duration_sec"]
+            if self._v2_world_state is not None:
+                try:
+                    snapshot = self._v2_world_state.get_snapshot()
+                    sources = snapshot.get("sources", {})
+                    attention_sources = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                    arrival_entry["source_count"] = len(sources)
+                    arrival_entry["attention_sources"] = len(attention_sources)
+                except Exception:
+                    pass
+            self._log_presence_event_raw(arrival_entry)
 
         if present:
             # Start settling timer — fire presence_settled after 60s of stable presence
@@ -1556,12 +1611,108 @@ class snarlingCreature:
             minutes = int((seconds % 3600) // 60)
             return f"{hours}h{minutes}m" if minutes else f"{hours}h"
 
+    def _update_presence_db(self, present, confidence="high"):
+        """Write deterministic presence fields directly to presence.db.
+        Only writes: present, since, last_seen, presence_confidence, updated_at.
+        Leaves environment_summary and environment_summary_updated_at untouched — the agent owns those."""
+        db_path = "/home/openpi/.openclaw/workspace-environmental/memory/presence.db"
+        try:
+            import sqlite3 as _sql
+            conn = _sql.connect(db_path, timeout=5)
+            cur = conn.cursor()
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
+
+            # Read current row to preserve environment_summary + its timestamp
+            cur.execute("SELECT environment_summary, environment_summary_updated_at FROM presence WHERE id = 1")
+            row = cur.fetchone()
+            old_summary = row[0] if row else "environment_stable"
+            old_summary_ts = row[1] if row and row[1] else ""
+
+            if present:
+                # Arriving: since = arrival time (always reset on arrival)
+                cur.execute("""UPDATE presence SET
+                    present = ?,
+                    since = ?,
+                    last_seen = ?,
+                    presence_confidence = ?,
+                    environment_summary = ?,
+                    environment_summary_updated_at = ?,
+                    updated_at = ?
+                WHERE id = 1""", (
+                    1,
+                    now_iso,  # since: arrival time
+                    now_iso,  # last_seen
+                    confidence,
+                    old_summary,  # preserve agent's interpretive label
+                    old_summary_ts,  # preserve agent's timestamp
+                    now_iso,  # updated_at
+                ))
+            else:
+                # Departing/absent: since = when absence started
+                absence_since = now_iso
+                if self._last_absence_time is not None:
+                    absence_since = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(self._last_absence_time))
+                cur.execute("""UPDATE presence SET
+                    present = ?,
+                    since = ?,
+                    last_seen = ?,
+                    presence_confidence = ?,
+                    environment_summary = ?,
+                    environment_summary_updated_at = ?,
+                    updated_at = ?
+                WHERE id = 1""", (
+                    0,
+                    absence_since,    # when absence started
+                    now_iso,          # last_seen = now
+                    confidence,
+                    old_summary,  # preserve agent's interpretive label
+                    old_summary_ts,  # preserve agent's timestamp
+                    now_iso,  # updated_at
+                ))
+            conn.commit()
+            conn.close()
+            append_log(f"presence.db updated: present={present}")
+        except Exception as e:
+            append_log(f"presence.db write failed: {e}")
+
     def _post_environmental_event(self, event_data):
         """Post an environmental event to the OpenClaw plugin.
         Fire-and-forget — if the plugin isn't listening, that's fine.
         Only posts if ENVIRONMENTAL_EVENTS_ENABLED is True."""
         if not ENVIRONMENTAL_EVENTS_ENABLED:
             return
+
+        # Write deterministic presence fields to presence.db directly.
+        # This ensures presence.db stays current even if the agent never
+        # receives push events (which it doesn't — see bug #86090).
+        event_type = event_data.get("type")
+        event_present = event_data.get("present")
+        append_log(f"_post_env: type={event_type}, present={event_present}, settled={self._is_settled}")
+        if event_present is not None:
+            if event_type == "presence_settled":
+                self._update_presence_db(present=True)
+            elif event_type == "thermal_alert":
+                # Attention threshold not met — do NOT write to presence.db
+                # presence.db stays absent. thermal_alert goes to agent for classification.
+                pass  # no DB write for thermal alerts
+            elif event_type == "presence_change":
+                if event_present:
+                    self._update_presence_db(present=True)
+                else:
+                    self._update_presence_db(present=False)
+            elif event_type == "observation_report":
+                # Observation reports: update present based on settled state
+                if event_present:
+                    self._update_presence_db(present=True)
+                else:
+                    self._update_presence_db(present=False)
+
+        # Don't send thermal_alert events to the environmental agent yet.
+        # They're logged locally but not forwarded until Stage 3 is ready.
+        if event_data.get("trigger_reason") == "thermal_alert":
+            append_log(f"thermal_alert: logged locally, not forwarded to agent (Stage 3 pending)")
+            return
+
         try:
             import requests as req_lib
             gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
@@ -1617,9 +1768,32 @@ class snarlingCreature:
 
     def _on_presence_settled(self):
         """Called 60 seconds after stable presence detected.
-        Fires observation_report with trigger_reason='presence_settled'.
-        V1 presence_settled event removed — V2 observation_report is the superset."""
-        self._is_settled = True
+        Fires observation_report with trigger_reason='presence_settled' if
+        attention_sources >= ATTENTION_THRESHOLD, otherwise rejects settlement
+        and fires thermal_alert instead of presence_settled."""
+        ATTENTION_THRESHOLD = 4  # minimum attention sources for confirmed presence
+
+        # Check attention threshold before promoting to settled
+        n_attention = 0
+        attention_passed = True  # default to pass if V2 unavailable
+        if self._v2_world_state is not None:
+            try:
+                snapshot = self._v2_world_state.get_snapshot()
+                sources = snapshot.get("sources", {})
+                attention_sources_list = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                n_attention = len(attention_sources_list)
+                attention_passed = n_attention >= ATTENTION_THRESHOLD
+            except Exception as e:
+                append_log(f"presence_settled attention check error: {e}")
+
+        if attention_passed:
+            self._is_settled = True
+            settled_type = "presence_settled"
+        else:
+            # Not enough attention sources — reject settlement, stay approaching
+            append_log(f"thermal_alert: {n_attention} attention sources < {ATTENTION_THRESHOLD} threshold, not a confirmed person")
+            settled_type = "thermal_alert"
+
         absent_sec = self._last_absence_duration_sec
         absent_str = self._format_duration(absent_sec) if absent_sec else None
 
@@ -1628,10 +1802,10 @@ class snarlingCreature:
         if self._approach_start_time is not None:
             approach_sec = round(time.time() - self._approach_start_time, 1)
 
-        # Log settled event locally (for audit trail)
+        # Log settled/rejected event locally (for audit trail)
         settled_log_entry = {
             "ts": int(time.time()),
-            "type": "presence_settled",
+            "type": settled_type,
             "abs": absent_sec if absent_sec else 0,
         }
         if approach_sec is not None:
@@ -1640,21 +1814,53 @@ class snarlingCreature:
             settled_log_entry["prox_peak"] = round(self._proximity_peak, 2)
         if self._zone_flip_count > 0:
             settled_log_entry["zone_flips"] = self._zone_flip_count
+
+        # Add attention source data for threshold tuning
+        if self._v2_world_state is not None:
+            try:
+                snapshot = self._v2_world_state.get_snapshot()
+                sources = snapshot.get("sources", {})
+                established = [s for s in sources.values() if s.get("observation_count", 0) >= 3]
+                attention_sources = [s for s in sources.values() if s.get("observation_count", 0) >= 3 and s.get("centroid_drift", 999) < 2.0 and s.get("peak_temp", 0) > 28.5]
+                settled_log_entry["source_count"] = len(sources)
+                settled_log_entry["established_sources"] = len(established)
+                settled_log_entry["attention_sources"] = len(attention_sources)
+                # Temperature distribution: group attention sources by peak temp range
+                if attention_sources:
+                    temp_ranges = {"body_range": 0, "warm_range": 0, "hot_range": 0}
+                    for s in attention_sources:
+                        peak = s.get("peak_temp", 0)
+                        if peak >= 40:
+                            temp_ranges["hot_range"] += 1  # burners, oven
+                        elif peak >= 34:
+                            temp_ranges["warm_range"] += 1  # warm objects
+                        else:
+                            temp_ranges["body_range"] += 1  # body temp range
+                    settled_log_entry["attention_temp_distribution"] = temp_ranges
+                    # Average drift and stability of attention sources
+                    avg_drift = sum(s.get("centroid_drift", 0) for s in attention_sources) / len(attention_sources)
+                    settled_log_entry["avg_drift"] = round(avg_drift, 3)
+                else:
+                    settled_log_entry["attention_temp_distribution"] = {"body_range": 0, "warm_range": 0, "hot_range": 0}
+            except Exception as e:
+                append_log(f"attention_log error in settled event: {e}")
+
         self._log_presence_event_raw(settled_log_entry)
 
-        # Fire V2 observation_report with trigger_reason='presence_settled'
-        # This replaces the V1 presence_settled event — it carries all the same
-        # data (absent_duration, absent_duration_sec) plus world_state and changes.
+        # Fire V2 observation_report with appropriate trigger_reason
+        # If attention_passed, trigger is 'presence_settled' (confirmed presence)
+        # If rejected, trigger is 'thermal_alert' (thermal activity but not enough attention)
+        v2_trigger_reason = settled_type  # 'presence_settled' or 'thermal_alert'
         if self._v2_trigger_scheduler is not None and self._v2_world_state is not None:
             try:
                 snapshot = self._v2_world_state.get_snapshot()
                 event = self._v2_trigger_scheduler.on_presence_settled(snapshot)
                 if event is not None:
                     # Agent context: distilled view without histories
-                    agent_context = self._v2_world_state.get_agent_context("presence_settled")
+                    agent_context = self._v2_world_state.get_agent_context(v2_trigger_reason)
                     v2_event = {
                         "type": "observation_report",
-                        "trigger_reason": "presence_settled",
+                        "trigger_reason": v2_trigger_reason,
                         "present": True,
                         "absent_duration": event.absent_duration,
                         "absent_duration_sec": event.absent_duration_sec,
@@ -1662,14 +1868,23 @@ class snarlingCreature:
                         "changes_since_last": event.changes_since_last,
                         "timestamp": event.timestamp,
                     }
+                    append_log(f"{v2_trigger_reason} → _post_env: type={v2_event.get('type')}, present={v2_event.get('present')}, attention={'PASS' if attention_passed else 'REJECT'}")
                     self._post_environmental_event(v2_event)
-                    n_sources = agent_context.get("summary", {}).get("source_count", "?")
-                    n_attention = len(agent_context.get("attention_sources", []))
-                    append_log(f"V2 observation_report (presence_settled): {n_sources} sources, {n_attention} attention")
             except Exception as e:
-                append_log(f"V2 presence_settled error: {e}")
+                append_log(f"V2 {v2_trigger_reason} error: {e}")
 
-        print(f"[snarling] Presence settled (absent for {absent_str or 'unknown'} before return)")
+        print(f"[snarling] Presence {'settled' if attention_passed else 'REJECTED (not enough attention sources)'} (absent for {absent_str or 'unknown'} before return)")
+
+        # If attention threshold was rejected, retry settling in 30 seconds
+        # This handles the case where sources need more time to establish
+        # (e.g., person just walked in and sources are still accumulating)
+        if not attention_passed:
+            if self._settling_timer is not None:
+                self._settling_timer.cancel()
+            self._settling_timer = threading.Timer(30.0, self._on_presence_settled)
+            self._settling_timer.daemon = True
+            self._settling_timer.start()
+            append_log("thermal_alert: retrying settlement check in 30s")
 
     # ── End thermal callbacks ───────────────────────────────────────
 
@@ -1914,15 +2129,11 @@ class snarlingCreature:
         # Strip emoji characters that DejaVu can't render
         message = self._strip_emoji(message)
         try:
-            banner_header_font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 24
-            )
             banner_msg_font = ImageFont.truetype(
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf", 19
             )
         except OSError:
-            banner_header_font = ImageFont.load_default()
-            banner_msg_font = banner_header_font
+            banner_msg_font = ImageFont.load_default()
 
         def word_wrap(text, font, max_width):
             """Word-wrap text to fit within max_width pixels using the given font."""
@@ -1948,53 +2159,29 @@ class snarlingCreature:
                 lines.append(current)
             return lines
 
-        # Banner 1: Priority header + short preview
-        priority_headers = {
-            'high': "!! HIGH",
-            'normal': "* MODERATE",
-            'low': "~ LOW",
-        }
-        header = priority_headers.get(priority, "* NOTIFICATION")
-        # Preview line: first ~25 chars of message, word-wrapped
-        preview_text = message[:25]
-        # If we cut in the middle of a word, truncate at last space
-        if len(message) > 25 and ' ' in preview_text:
-            preview_text = preview_text.rsplit(' ', 1)[0]
-        # Word-wrap preview with header font
-        preview_lines = word_wrap(preview_text, banner_header_font, max_width=280)
-        preview_line = preview_lines[0] if preview_lines else ""
-        banner1 = [header, preview_line]
-
-        # Banner 2: First 3 lines of the full message
+        # Split message into 3-line chunks for compact banners
         msg_lines = word_wrap(message, banner_msg_font, max_width=280)
-        banner2_lines = msg_lines[:3]
-        # If there's more, truncate last line with "..."
-        if len(msg_lines) > 3:
-            banner2_lines = msg_lines[:3]
-            banner2_lines[2] = banner2_lines[2][:30] + "..."
-        while len(banner2_lines) < 3:
-            banner2_lines.append("")
-        banner2 = banner2_lines
 
-        # Banner 3: Continuation — lines 4+ of the full message
-        remaining_lines = msg_lines[3:] if len(msg_lines) > 3 else []
-        if remaining_lines:
-            banner3_lines = remaining_lines[:3]
-            # If still more, truncate last line with "..."
-            if len(remaining_lines) > 3:
-                banner3_lines = remaining_lines[:3]
-                banner3_lines[2] = banner3_lines[2][:30] + "..."
-            while len(banner3_lines) < 3:
-                banner3_lines.append("")
-            banner3 = banner3_lines
-        else:
-            # No continuation needed — skip banner 3 (empty)
-            banner3 = None
+        # Build banners: each banner is 3 lines of content
+        banners = []
+        for i in range(0, len(msg_lines), 3):
+            chunk = msg_lines[i:i+3]
+            # Truncate last line of last chunk if there's more content
+            if i + 3 < len(msg_lines) and len(chunk) == 3:
+                chunk[2] = chunk[2][:30] + "..."
+            # Pad to 3 lines
+            while len(chunk) < 3:
+                chunk.append("")
+            banners.append(chunk)
 
-        self._notify_banners = [b for b in [banner1, banner2, banner3] if b is not None]
+        # Ensure at least one banner (even for empty messages)
+        if not banners:
+            banners = [["", "", ""]]
+
+        self._notify_banners = banners
         self._notify_banner_index = 0
         self._notify_banner_timer = 0
-        self._notify_banner_interval = 45  # ~1.5s at 30fps
+        self._notify_banner_interval = 90  # ~3s at 30fps (was 45 = 1.5s)
 
     def set_notification(self, message, priority='normal', notification_id=None, callback_url=None, session_key=None, secret=None, duration=None):
         """Set state to notifying with message and priority.
@@ -2430,6 +2617,12 @@ class snarlingCreature:
                 # Activate next queued approval or return to normal
                 self._advance_after_approval()
 
+        # Auto-recover from error state when status timer expires
+        # (processing and listening are managed by the plugin — agent_end sends sleeping)
+        if self.status_timer == 0 and self.state == STATE_ERROR:
+            self.state = STATE_SLEEPING
+            self.led_timer = 0
+
     def draw_frame(self):
         """Render the frame using the new design system"""
         # Check if screen is asleep (but allow status messages to show)
@@ -2556,7 +2749,7 @@ class snarlingCreature:
                 print(f"[snarling] Thermal sensor start failed: {e}")
                 self._thermal_available = False
 
-        target_fps = 30
+        target_fps = 10
         frame_time = 1.0 / target_fps
 
         try:
@@ -2863,4 +3056,3 @@ if __name__ == "__main__":
         approval_thread.start()
     
     creature.run()
-
