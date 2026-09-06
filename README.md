@@ -353,6 +353,11 @@ cd snarling
 # Install dependencies
 pip install flask pillow requests websocket-client mlx90640
 
+# Voice input with Silero VAD (speech-controlled recording)
+# --no-deps is critical: silero-vad's default deps pull PyTorch + NVIDIA CUDA
+# wheels (gigabytes) the Pi doesn't need. See "VAD Dependencies" below.
+pip install --no-deps onnxruntime silero-vad
+
 # Configure the gateway token (see next section), then:
 # Copy the systemd service file to enable auto-start
 sudo cp snarling.service /etc/systemd/system/
