@@ -2464,13 +2464,14 @@ class snarlingCreature:
         # Split message into 3-line chunks for compact banners
         msg_lines = word_wrap(message, banner_msg_font, max_width=280)
 
-        # Build banners: each banner is 3 lines of content
+        # Build banners: each banner is 3 lines of content.
+        # Capacity target: ~2 full banners with slight overflow onto a 3rd page
+        # (~190 chars); the banner rotation (3s/page) keeps longer messages readable.
+        msg_lines = msg_lines[:9]   # 3 banners × 3 lines — soft cap, overflow trimmed
+
         banners = []
         for i in range(0, len(msg_lines), 3):
             chunk = msg_lines[i:i+3]
-            # Truncate last line of last chunk if there's more content
-            if i + 3 < len(msg_lines) and len(chunk) == 3:
-                chunk[2] = chunk[2][:30] + "..."
             # Pad to 3 lines
             while len(chunk) < 3:
                 chunk.append("")
