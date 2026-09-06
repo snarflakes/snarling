@@ -322,6 +322,7 @@ cd snarling
 # Install dependencies
 pip install flask pillow requests websocket-client mlx90640
 
+# Configure the gateway token (see next section), then:
 # Copy the systemd service file to enable auto-start
 sudo cp snarling.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -333,6 +334,33 @@ python snarling.py
 ```
 
 The service file handles auto-restart on crash/kill.
+
+### Configure the gateway token
+
+Snarling calls back to your OpenClaw gateway (approval responses, notification feedback, voice input, environmental events), and the gateway rejects unauthenticated calls. **Your gateway token is a secret — it is not in this repo.** Grab it from your gateway config:
+
+```bash
+grep -A2 '"auth"' ~/.openclaw/openclaw.json
+# or the env-var equivalent: OPENCLAW_GATEWAY_TOKEN
+```
+
+Then create `/etc/snarling.env` (root-readable only — the systemd service loads it at startup):
+
+```bash
+sudo tee /etc/snarling.env > /dev/null <<'EOF'
+OPENCLAW_GATEWAY_TOKEN=paste-your-gateway-token-here
+EOF
+sudo chmod 600 /etc/snarling.env
+```
+
+Options you can also set there:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `OPENCLAW_GATEWAY_TOKEN` | *(none)* | Gateway auth token — required for approval/notification callbacks |
+| `OPENCLAW_GATEWAY_URL` | `http://localhost:18789` | Gateway base URL (change if yours runs elsewhere/another port) |
+
+If the token is missing, Snarling still renders and accepts `/state` updates from the plugin, but logs a warning at startup and callbacks (approvals, notifications, voice) will fail auth.
 
 ### 2. Install the Interaction Bridge Plugin
 

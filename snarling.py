@@ -12,6 +12,7 @@ import math
 import random
 import signal
 import sys
+import os
 import json
 import threading
 
@@ -33,6 +34,27 @@ OPENCLAW_AVAILABLE = False
 
 # Environmental event posting to OpenClaw plugin
 ENVIRONMENTAL_EVENTS_ENABLED = True  # Set to False to disable posting events to OpenClaw
+
+# ── OpenClaw gateway connection ─────────────────────────────────────────────
+# Snarling talks to the OpenClaw gateway (HTTP + WebSocket) to deliver approval
+# responses, notification feedback, environmental events, and voice input.
+#
+# Configure with environment variables (recommended: set them in the systemd
+# service or snarling.env — see README "Configure the gateway token"):
+#   OPENCLAW_GATEWAY_TOKEN   auth token for the gateway (required for callbacks)
+#   OPENCLAW_GATEWAY_URL     base URL (default: http://localhost:18789)
+GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "http://localhost:18789").rstrip("/")
+GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+
+def _gateway_ws_url():
+    """WebSocket URL derived from GATEWAY_URL."""
+    ws_base = GATEWAY_URL.replace("http://", "ws://").replace("https://", "wss://")
+    return f"{ws_base}/ws"
+
+if not GATEWAY_TOKEN:
+    print("[snarling] WARNING: OPENCLAW_GATEWAY_TOKEN not set — approval/notification "
+          "callbacks, environmental events, and voice input will fail auth. "
+          'Set it in snarling.env (see README "Configure the gateway token").')
 
 # Screen dimensions
 WIDTH = DisplayHATMini.WIDTH
@@ -1121,8 +1143,8 @@ class snarlingCreature:
 
                 # Step 2: POST WAV path to plugin for transcription + injection
                 import requests as req_lib
-                gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
-                url = "http://localhost:18789/transcribe-and-reply"
+                gateway_token = GATEWAY_TOKEN
+                url = f"{GATEWAY_URL}/transcribe-and-reply"
                 try:
                     response = req_lib.post(
                         url,
@@ -1715,9 +1737,9 @@ class snarlingCreature:
 
         try:
             import requests as req_lib
-            gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+            gateway_token = GATEWAY_TOKEN
             req_lib.post(
-                "http://localhost:18789/environmental-event",
+                f"{GATEWAY_URL}/environmental-event",
                 json=event_data,
                 headers={
                     "Authorization": f"Bearer {gateway_token}",
@@ -1945,8 +1967,8 @@ class snarlingCreature:
         try:
             import requests as req_lib
             # Call OpenClaw's approval-callback webhook
-            gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
-            webhook_url = "http://localhost:18789/approval-callback"
+            gateway_token = GATEWAY_TOKEN
+            webhook_url = f"{GATEWAY_URL}/approval-callback"
             response_data = {
                 "request_id": request_id,
                 "approved": approved,
@@ -1978,7 +2000,7 @@ class snarlingCreature:
                     try:
                         import websocket
                         ws = websocket.create_connection(
-                            'ws://127.0.0.1:18789/ws',
+                            _gateway_ws_url(),
                             timeout=10,
                             header=['Authorization: Bearer ' + gateway_token]
                         )
@@ -2033,7 +2055,7 @@ class snarlingCreature:
         print(f"[snarling] Forwarding notification feedback for {notify_id}: action={action}, time_to_reveal={time_to_reveal_sec + time_in_queue_sec:.1f}s (display={time_to_reveal_sec:.1f}s + queue={time_in_queue_sec:.1f}s) (sessionKey={session_key})")
         try:
             import requests as req_lib
-            gateway_token = "c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+            gateway_token = GATEWAY_TOKEN
 
             # Add presence data from environmental state
             try:
@@ -2080,7 +2102,7 @@ class snarlingCreature:
                     try:
                         import websocket
                         ws = websocket.create_connection(
-                            'ws://127.0.0.1:18789/ws',
+                            _gateway_ws_url(),
                             timeout=10,
                             header=['Authorization: Bearer ' + gateway_token]
                         )

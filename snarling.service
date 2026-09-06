@@ -1,5 +1,5 @@
 [Unit]
-Description=snarling Display Service
+Description=Snarling Display Service
 After=graphical.target
 Wants=graphical.target
 
@@ -10,9 +10,12 @@ WorkingDirectory=/home/openpi/.openclaw/workspace/snarling
 ExecStart=/home/openpi/displayhat-env/bin/python /home/openpi/.openclaw/workspace/snarling/snarling.py
 Restart=on-failure
 RestartSec=5
-Environment="OPENCLAW_TOKEN=c1e2798a58fcf2414a4602f743a193838f6e4416eb5a61ed"
+Nice=10
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/home/openpi/.openclaw/workspace/snarling"
+# Gateway auth — create this file with your own OPENCLAW_GATEWAY_TOKEN
+# (see README "Configure the gateway token"). Do NOT put the token in this file.
+EnvironmentFile=/etc/snarling.env
 
 [Install]
 WantedBy=default.target
