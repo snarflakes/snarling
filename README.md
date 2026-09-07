@@ -137,6 +137,30 @@ Snarling has a built-in microphone input flow via the **X button**. When pressed
 
 `--no-deps` matters: `silero-vad`'s default dependencies pull PyTorch and NVIDIA CUDA wheels (gigabytes) that the Pi doesn't need. The ONNX model ships inside the `silero-vad` wheel (~2.3 MB); `onnxruntime` runs it on CPU at roughly **1.7 ms per 32 ms chunk** — negligible load on a Pi 4. Recording works fully offline after installation. If VAD can't initialize, the exact reason is logged and recording falls back to the fixed duration (`VAD_FALLBACK_RECORD_SEC`), so voice input never breaks — it just records the old way.
 
+## Text-to-Speech Notifications (optional)
+
+Snarling can speak notification text aloud through any TTS engine you configure. It is engine-agnostic: snarling only knows a contract, not piper.
+
+**The contract:** `TTS_COMMAND` is a full command line. When a notification activates, snarling pipes the cleaned message text to the command's **stdin** and waits (up to 120s) for it to exit. Only the currently-activating notification is spoken — queued/stacked items are spoken when they activate. Speech is suppressed while the mic is recording.
+
+**Env vars:**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TTS_ENABLED` | `true` | Boot-time on/off switch |
+| `TTS_COMMAND` | *(empty)* | Full command line; empty = TTS silently inert |
+| `TTS_MAX_CHARS` | `200` | Message text is capped to this before speaking |
+
+Text is cleaned before speaking: markdown characters (`#*_\`~>|`), emoji/non-ASCII, and extra whitespace are stripped.
+
+**Bluetooth sink gotcha:** if your output is a Bluetooth speaker, include ~0.6s of silence **before** the speech audio in your command. Suspended BT sinks drop the first ~1s of audio while the link renegotiates — without a pre-roll you lose the start of every message.
+
+**Example:** see [`examples/tts-piper.sh`](examples/tts-piper.sh) — a piper + ffplay reference implementation of the contract (text on stdin → piper render → 0.6s silent pre-roll → ffplay). Voice model path comes from `PIPER_VOICE_MODEL` (download instructions in the script header). Wire it up:
+
+```bash
+TTS_COMMAND=/path/to/tts-piper.sh
+```
+
 ## Physical Approvals
 
 Snarling isn't just a display — it's an input device. When your agent needs approval for an action (deleting a file, sending a message, etc.), Snarling enters **awaiting approval** state and shows the request on screen.
