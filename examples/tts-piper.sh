@@ -19,6 +19,15 @@
 #
 # Install piper to ~/.local/bin/piper and make sure ffmpeg/ffplay are installed.
 #
+# Output device: playback goes to the system default sink (PipeWire/WirePlumber).
+#   USB/HDMI/analog speakers: just plug in and set as default (wpctl set-default <id>).
+#   Bluetooth speakers: keep the pre-roll (below) — see TTS_PREROLL.
+#
+# TTS_PREROLL: seconds of silence played before speech. Bluetooth sinks suspend
+#   when idle and eat the first ~1s of audio during link renegotiation, so BT
+#   users want 0.6 (the default). USB/HDMI/analog output has no such handshake —
+#   set TTS_PREROLL=0 for instant playback.
+#
 # Configure snarling with:
 #   TTS_COMMAND=/path/to/tts-piper.sh
 
@@ -32,14 +41,16 @@ TEXT="$(cat)"
 [ -z "$TEXT" ] && exit 0
 
 WAV="$OUTDIR/tts-piper-$$.wav"
-PREROLL="$OUTDIR/tts-piper-preroll-$$.wav"
-trap 'rm -f "$WAV" "$PREROLL"' EXIT
+trap 'rm -f "$WAV" "$PREROLL" 2>/dev/null' EXIT
 
 printf '%s' "$TEXT" | "$PIPER" --model "$MODEL" --output_file "$WAV"
 
-# Pre-roll: 0.6s of silence before speech wakes a suspended Bluetooth sink.
-# Without it, BT sinks eat the first ~1s of audio during link renegotiation.
-ffmpeg -loglevel error -f lavfi -i anullsrc=r=22050:cl=mono -t 0.6 -sample_fmt s16 "$PREROLL" -y
+PREROLL_SEC="${TTS_PREROLL:-0.6}"   # BT sinks: 0.6; USB/HDMI/analog: set 0
+if [ "$PREROLL_SEC" != "0" ]; then
+  PREROLL="$OUTDIR/tts-piper-preroll-$$.wav"
+  # Pre-roll: silence wakes a suspended Bluetooth sink so speech isn't clipped.
+  ffmpeg -loglevel error -f lavfi -i anullsrc=r=22050:cl=mono -t "$PREROLL_SEC" -sample_fmt s16 "$PREROLL" -y
+  ffplay -autoexit -nodisp -loglevel error "$PREROLL" 2>/dev/null
+fi
 
-ffplay -autoexit -nodisp -loglevel error "$PREROLL" 2>/dev/null
 ffplay -autoexit -nodisp -loglevel error "$WAV" 2>/dev/null
