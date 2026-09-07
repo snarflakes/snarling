@@ -2603,7 +2603,7 @@ class snarlingCreature:
         self._notify_banners = banners
         self._notify_banner_index = 0
         self._notify_banner_timer = 0
-        self._notify_banner_interval = 90  # ~3s at 30fps (was 45 = 1.5s)
+        self._notify_banner_interval = 45  # ~1.5s at 30fps (Snar preference)
 
     def set_notification(self, message, priority='normal', notification_id=None, callback_url=None, session_key=None, secret=None, duration=None):
         """Set state to notifying with message and priority.
