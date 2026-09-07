@@ -151,6 +151,8 @@ Snarling can speak notification text aloud through any TTS engine you configure.
 | `TTS_COMMAND` | *(empty)* | Full command line; empty = TTS silently inert |
 | `TTS_MAX_CHARS` | `200` | Message text is capped to this before speaking |
 
+> **systemd installs:** the service runs without your desktop session env. If audio doesn't play (banner works, no sound), add `XDG_RUNTIME_DIR=/run/user/1000` and `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus` to the service env (e.g. `/etc/snarling.env`), then restart. Without these, the TTS command cannot reach the user's PipeWire/PulseAudio instance and playback fails silently.
+
 Text is cleaned before speaking: markdown characters (`#*_\`~>|`), emoji/non-ASCII, and extra whitespace are stripped.
 
 **Bluetooth sink gotcha:** if your output is a Bluetooth speaker, include ~0.6s of silence **before** the speech audio in your command. Suspended BT sinks drop the first ~1s of audio while the link renegotiates — without a pre-roll you lose the start of every message.
