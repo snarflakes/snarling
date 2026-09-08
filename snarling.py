@@ -15,6 +15,7 @@ import sys
 import os
 import json
 import threading
+import queue
 
 # Fix output buffering so print statements show up immediately in logs
 sys.stdout.reconfigure(line_buffering=True)
@@ -106,6 +107,14 @@ VAD_TAIL_SEC = float(os.environ.get("VAD_TAIL_SEC", "0.2"))                     
 VAD_FALLBACK_RECORD_SEC = float(os.environ.get("VAD_FALLBACK_RECORD_SEC", "20.0"))  # fixed duration fallback
 VAD_SAMPLE_RATE = 16000                   # Silero-native; WAV stays OpenAI-compatible
 VAD_CHUNK_SAMPLES = 512                   # 32 ms at 16 kHz — Silero's required chunk size
+
+# ── Text-to-speech notifications (optional) ────────────────────────────────
+# Engine-agnostic: TTS_COMMAND is a full command line that reads the message
+# text on STDIN and blocks until playback finishes (e.g. /home/openpi/bin/say).
+# If TTS_COMMAND is empty, TTS is silently inert even when enabled.
+TTS_ENABLED = os.environ.get("TTS_ENABLED", "true").lower() in ("1", "true", "yes")
+TTS_COMMAND = os.environ.get("TTS_COMMAND", "")   # e.g. /home/openpi/bin/say
+TTS_MAX_CHARS = int(os.environ.get("TTS_MAX_CHARS", "200"))
 
 # Design system dimensions
 BORDER_MARGIN = 5             # Outer border margin from screen edges
@@ -291,6 +300,110 @@ class FaceExpressions:
         return cls.NOTIFY_NORMAL
 
 
+# ── TTS worker ─────────────────────────────────────────────────────────────
+
+class TTSWorker:
+    """Speak notification text through a user-configured TTS_COMMAND.
+
+    Contract: the command reads the message text on STDIN and blocks until
+    playback finishes. A daemon worker thread drains a FIFO queue (dropping
+    the oldest item beyond depth 3). Speech is suppressed while the mic is
+    recording (recording_fn returns True) — the item is skipped and dropped.
+    Every failure path is swallowed: TTS must never crash snarling.
+    """
+
+    MAX_QUEUE = 3
+    RENDER_TIMEOUT_SEC = 120
+
+    def __init__(self, recording_fn=None):
+        self._q = queue.Queue()
+        self._thread = None
+        self._lock = threading.Lock()
+        self._recording_fn = recording_fn  # returns True while mic is recording
+
+    def enqueue(self, text):
+        """Queue text for speaking. Never raises."""
+        if not text or not TTS_ENABLED or not TTS_COMMAND:
+            return
+        try:
+            with self._lock:
+                if self._thread is None or not self._thread.is_alive():
+                    self._thread = threading.Thread(target=self._run, daemon=True)
+                    self._thread.start()
+            # Drain + requeue, dropping oldest beyond MAX_QUEUE
+            items = []
+            while True:
+                try:
+                    items.append(self._q.get_nowait())
+                except queue.Empty:
+                    break
+            items.append(text)
+            if len(items) > self.MAX_QUEUE:
+                items = items[-self.MAX_QUEUE:]
+                print(f"[snarling] TTS queue full — dropped oldest")
+            for it in items:
+                self._q.put_nowait(it)
+            print(f"[snarling] TTS queued ({self._q.qsize()} pending)")
+        except Exception as e:
+            print(f"[snarling] TTS enqueue error: {e}")
+
+    @staticmethod
+    def clean_text(text, max_chars=None):
+        """Strip markdown chars + emoji/non-ASCII, collapse whitespace, cap length."""
+        import re
+        if max_chars is None:
+            max_chars = TTS_MAX_CHARS
+        text = re.sub(r"\s", " ", text)  # normalize whitespace before filtering
+        for ch in "#*_`~>|":
+            text = text.replace(ch, " ")
+        text = "".join(c for c in text if ord(c) < 128 and c.isprintable())
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_chars]
+
+    def _run(self):
+        """Worker loop. Wrapped so TTS can never crash snarling."""
+        try:
+            while True:
+                text = self._q.get()
+                try:
+                    if self._recording_fn is not None and self._recording_fn():
+                        print("[snarling] TTS skipped — mic recording")
+                        continue
+                    self._speak(text)
+                except Exception as e:
+                    print(f"[snarling] TTS worker error: {e}")
+                finally:
+                    self._q.task_done()
+        except Exception as e:
+            print(f"[snarling] TTS worker fatal (worker stopped): {e}")
+
+    def _speak(self, text):
+        """Render+play one utterance via TTS_COMMAND (text on stdin)."""
+        import shlex
+        import subprocess
+        cleaned = self.clean_text(text)
+        if not cleaned:
+            return
+        cmd = ["nice", "-n", "19", *shlex.split(TTS_COMMAND)]
+        proc = None
+        try:
+            print(f"[snarling] TTS speaking: '{cleaned[:50]}'")
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            proc.stdin.write(cleaned.encode("utf-8", "replace"))
+            proc.stdin.close()
+            proc.wait(timeout=self.RENDER_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            print(f"[snarling] TTS command timed out after {self.RENDER_TIMEOUT_SEC}s — killing")
+            if proc is not None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[snarling] TTS speak failed: {e}")
+
+
 class snarlingCreature:
     """Main creature class"""
 
@@ -345,6 +458,10 @@ class snarlingCreature:
         # Notification stack (priority-sorted pending queue)
         self._notify_stack = []  # list of {"message": str, "priority": str, "_seq": int, "notification_id": str|None, "callback_url": str|None, "session_key": str|None, "secret": str|None, "duration": int}
         self._notify_seq = 0  # monotonically increasing insertion counter for LIFO within same priority
+
+        # TTS for notifications (see TTSWorker); suppressed while mic records
+        self._voice_recording = False
+        self.tts_worker = TTSWorker(recording_fn=lambda: self._voice_recording)
 
         # Banner cycling (may already exist via set_notification, but init here too)
         self._notify_banners = []
@@ -1217,6 +1334,7 @@ class snarlingCreature:
         import threading
         import subprocess
 
+        self._voice_recording = True   # suppress TTS while mic is live
         self.state = STATE_LISTENING
         self.status_message = "🎙 Listening..."
         self.status_timer = 900  # 30s cap covers max VAD recording window
@@ -1422,6 +1540,7 @@ class snarlingCreature:
                 self.led_timer = 30
                 return
             finally:
+                self._voice_recording = False
                 if proc is not None:
                     try:
                         proc.terminate()
@@ -2484,7 +2603,7 @@ class snarlingCreature:
         self._notify_banners = banners
         self._notify_banner_index = 0
         self._notify_banner_timer = 0
-        self._notify_banner_interval = 90  # ~3s at 30fps (was 45 = 1.5s)
+        self._notify_banner_interval = 45  # ~1.5s at 30fps (Snar preference)
 
     def set_notification(self, message, priority='normal', notification_id=None, callback_url=None, session_key=None, secret=None, duration=None):
         """Set state to notifying with message and priority.
@@ -2569,6 +2688,9 @@ class snarlingCreature:
         # Prepare banners
         self._prepare_notify_banners(message, priority)
 
+        # Speak the activating notification (engine-agnostic TTS, if configured)
+        self.tts_worker.enqueue(message)
+
         # Set state to notifying
         self.state = STATE_NOTIFYING
         # Reset face animation
@@ -2606,6 +2728,8 @@ class snarlingCreature:
             self._notify_sent_time = item.get('sent_time', 0)  # when notification arrived at snarling
             # Prepare banners for the new notification
             self._prepare_notify_banners(message, priority)
+            # Speak the newly-activating notification
+            self.tts_worker.enqueue(message)
             # Reset face animation for new priority
             self.face_index = 0
             self.face_timer = 0
