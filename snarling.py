@@ -2343,6 +2343,12 @@ class snarlingCreature:
         self._pending_flow_id = None
         self._pending_approval_secret = None
         self._pending_session_key = None
+        # Approval banner lifecycle is over — kill the 2-hour status_timer it
+        # set. Without this, _is_banner_active() stays True for hours after
+        # resolution: separator line + face shifted up + empty banner area
+        # (the "ghost" when the status_message is empty).
+        self.status_timer = 0
+        self.status_message = ""
 
         if self._approval_queue:
             # Pop the next queued approval and display it
@@ -2748,6 +2754,10 @@ class snarlingCreature:
         self._notify_reveal_time = 0
         self._notify_start_time = 0
         self._notify_pre_state = STATE_SLEEPING
+        # If an approval's 2-hour status_timer leaked into this notification's
+        # lifetime, kill it here too — otherwise the banner layout stays
+        # active (ghost line + shifted face) after the notification leaves.
+        self.status_timer = 0
         # Clean up notification feedback metadata
         self._notify_id = None
         self._notify_callback_url = None
