@@ -3246,6 +3246,35 @@ if FLASK_AVAILABLE and approval_app:
             else:
                 return jsonify({"error": "snarling not initialized"}), 503
         
+        # Native plugin-approval resolution push (bridge v1.8.0):
+        # the Gateway resolved the approval — clear the card, never display it.
+        if data.get('type') == 'approval_resolved':
+            resolved_id = data.get('request_id')
+            decision = data.get('decision') or ('approved' if data.get('approved') else 'unknown')
+            if resolved_id and getattr(creature_instance, '_pending_approval_id', None) == resolved_id \
+                    and creature_instance.state == STATE_AWAITING_APPROVAL:
+                print(f"[snarling] Approval resolved remotely: {resolved_id} ({decision}) — clearing card")
+                creature_instance._advance_after_approval()
+                return jsonify({"status": "approval_cleared"})
+            if resolved_id:
+                before = len(creature_instance._approval_queue)
+                creature_instance._approval_queue = [
+                    e for e in creature_instance._approval_queue if e.get('request_id') != resolved_id
+                ]
+                if len(creature_instance._approval_queue) != before:
+                    print(f"[snarling] Removed resolved approval from queue: {resolved_id} ({decision})")
+                    return jsonify({"status": "approval_cleared_from_queue"})
+            # Id-less resolution (binding gap): safe to clear only when exactly
+            # one card is pending — no queue, no ambiguity.
+            if not resolved_id and creature_instance.state == STATE_AWAITING_APPROVAL \
+                    and len(creature_instance._approval_queue) == 0:
+                print(f"[snarling] Id-less approval resolution ({decision}) — clearing solitary card")
+                creature_instance._advance_after_approval()
+                return jsonify({"status": "approval_cleared_idless"})
+            # Unknown/stale id — nothing on screen to clear; acknowledge only.
+            print(f"[snarling] Resolution for unknown/stale approval id: {resolved_id} ({decision})")
+            return jsonify({"status": "approval_unknown_id"})
+
         # Original approval flow
         request_id = data.get('request_id')
         message = data.get('message', 'Approval required')
