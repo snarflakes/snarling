@@ -3268,11 +3268,19 @@ if FLASK_AVAILABLE and approval_app:
                 return jsonify({"status": "approval_cleared"})
             if resolved_id:
                 before = len(creature_instance._approval_queue)
-                creature_instance._approval_queue = [
-                    e for e in creature_instance._approval_queue if e.get('request_id') != resolved_id
-                ]
-                if len(creature_instance._approval_queue) != before:
-                    print(f"[snarling] Removed resolved approval from queue: {resolved_id} ({decision})")
+                # Mutate in place: Flask runs threaded, and a full-list
+                # reassignment here could clobber an append from a concurrent
+                # set_awaiting_approval between the length check and write.
+                removed = 0
+                remaining = []
+                for entry in creature_instance._approval_queue:
+                    if entry.get('request_id') == resolved_id:
+                        removed += 1
+                    else:
+                        remaining.append(entry)
+                if removed:
+                    creature_instance._approval_queue[:] = remaining
+                    print(f"[snarling] Removed {removed} resolved approval(s) from queue: {resolved_id} ({decision})")
                     return jsonify({"status": "approval_cleared_from_queue"})
             # Id-less resolution (binding gap): safe to clear only when exactly
             # one card is pending — no queue, no ambiguity.
