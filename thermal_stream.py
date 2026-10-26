@@ -26,6 +26,9 @@ Environment variables:
   THERMAL_STREAM_FPS     — Target FPS for MJPEG stream (default 2)
   THERMAL_STREAM_WIDTH   — Output frame width (default 240)
   THERMAL_STREAM_HEIGHT  — Output frame height (default 240)
+  SNARLING_BIND          — Bind address for the MJPEG server (default 127.0.0.1;
+                           set 0.0.0.0 to view the stream from other devices on
+                           your network — the stream is unauthenticated)
 """
 
 import io
@@ -286,7 +289,8 @@ class ThermalStreamer:
 
         # Start MJPEG HTTP server
         handler = _make_handler(self)
-        self._server = HTTPServer(('0.0.0.0', self.port), handler)
+        bind_host = os.environ.get('SNARLING_BIND', '127.0.0.1')
+        self._server = HTTPServer((bind_host, self.port), handler)
         self._server_thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._server_thread.start()
         logger.info(f"[thermal_stream] MJPEG server started on port {self.port}")
