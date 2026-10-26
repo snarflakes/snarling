@@ -421,6 +421,7 @@ Options you can also set there:
 |----------|---------|---------|
 | `OPENCLAW_GATEWAY_TOKEN` | *(none)* | Gateway auth token — required for approval/notification callbacks |
 | `OPENCLAW_GATEWAY_URL` | `http://localhost:18789` | Gateway base URL (change if yours runs elsewhere/another port) |
+| `SNARLING_BIND` | `127.0.0.1` | Bind address for the local HTTP API (port 5000: approvals, notifications, state, presence). Default is loopback-only. Set `0.0.0.0` **only** if your gateway runs on another machine — this exposes unauthenticated endpoints (display control, presence/occupancy data, debug state) to your entire network. |
 
 If the token is missing, Snarling refuses to start with a clear error — the service intentionally stays down until the credential is configured. Once set, Snarling renders and accepts `/state` updates from the plugin, and callbacks (approvals, notifications, voice) authenticate automatically.
 

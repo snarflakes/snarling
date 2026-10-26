@@ -3516,7 +3516,8 @@ if FLASK_AVAILABLE and approval_app:
         """Run Flask server in background thread"""
         if approval_app:
             print("[snarling] Starting approval alert server on port 5000")
-            approval_app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+            host = os.environ.get("SNARLING_BIND", "127.0.0.1")
+            approval_app.run(host=host, port=5000, debug=False, threaded=True)
 
 
 if __name__ == "__main__":
